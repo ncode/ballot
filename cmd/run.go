@@ -24,11 +24,12 @@ to quickly create a Cobra application.`,
 		print(viper.GetStringSlice("election.enabled"))
 		for _, name := range viper.GetStringSlice("election.enabled") {
 			fmt.Println(name)
-			config := viper.GetStringMapString(fmt.Sprintf("election.services.%s", name))
-			b, err := ballout.New(name, config["kv"], config["check"], config["token"], config["onPromote"], config["onDemote"], config["primaryTag"])
+			b := &ballout.Ballout{}
+			err := viper.UnmarshalKey(fmt.Sprintf("election.services.%s", name), b)
 			if err != nil {
 				panic(err)
 			}
+			b.Name = name
 			b.Run()
 		}
 	},
