@@ -1,0 +1,15 @@
+consul:
+  token: 
+election:
+  enabled:
+    - my_service
+  services:
+    my_service:
+      id: my_service2
+      kv: service/my_service
+      token: 
+      checks:
+        - service:election2
+      primaryTag: primary
+      onPromote: '/usr/bin/printf promote'
+      onDemote: '/usr/bin/printf demote'
