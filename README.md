@@ -51,4 +51,5 @@ Works on my machine.
 - Write tests
 - Add a proper help for the cli
 - Cleanup the code and test with a real consul setup
+- Implement proper logging
 - ???
