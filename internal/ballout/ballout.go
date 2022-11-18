@@ -46,9 +46,11 @@ func (s *Ballout) EventLeader(f bool) {
 	service := services[s.ID]
 	if f {
 		err = agent.ServiceRegister(&api.AgentServiceRegistration{
-			Name: s.Name,
-			ID:   s.ID,
-			Tags: append(service.Tags, s.PrimaryTag),
+			Name:    s.Name,
+			ID:      s.ID,
+			Address: service.Address,
+			Port:    service.Port,
+			Tags:    append(service.Tags, s.PrimaryTag),
 		})
 		fmt.Println(err)
 		fmt.Println(s.Name, "I'm the leader!")
@@ -59,9 +61,11 @@ func (s *Ballout) EventLeader(f bool) {
 			return
 		}
 		err = agent.ServiceRegister(&api.AgentServiceRegistration{
-			Name: s.Name,
-			ID:   s.ID,
-			Tags: slices.Delete(tags, p, p+1),
+			Name:    s.Name,
+			ID:      s.ID,
+			Address: service.Address,
+			Port:    service.Port,
+			Tags:    slices.Delete(tags, p, p+1),
 		})
 		if err != nil {
 			fmt.Println(err)
