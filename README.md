@@ -5,7 +5,7 @@ Consul service election with tagging support and hooks
 ### What is it?
 
 Consul doesn't support leader election for registered services. This tool is meant to help with that. 
-The idea is that you have multiple services and you need to select a leader. When a election change happen from active to backup 
+The idea is that you have multiple services and you need to select a leader. When a election happens 
 you can hook a script execution.
 
 ### How do I test it?
