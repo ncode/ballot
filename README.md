@@ -37,7 +37,7 @@ $ sleep 10
 $ cp /bin/ls /tmp/lalala1
 $ rm /tmp/lalala2
 $ sleep 10
-$  cp /bin/ls /tmp/lalala2
+$ cp /bin/ls /tmp/lalala2
 ```
 
 ### Current state of this project?
