@@ -7,6 +7,7 @@ Consul service election with tagging support and hooks
 Consul doesn't support leader election for registered services. This tool is meant to help with that. 
 The idea is that you have multiple services and you need to select a leader. When a election happens 
 you can hook a script execution.
+Something like a very simplified idea of keepalived using consul
 
 ### How do I test it?
 
@@ -46,10 +47,8 @@ Works on my machine.
 
 ### TODO:
 
-- Finish the hooka
 - Testing using Consul Token
 - Write tests
 - Add a proper help for the cli
 - Cleanup the code and test with a real consul setup
-- Implement proper logging
-- ???
+- Allow to pre-define the preferred leader service like on keepalived
