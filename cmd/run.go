@@ -5,7 +5,7 @@ package cmd
 
 import (
 	"fmt"
-	"github.com/ncode/ballot/internal/ballout"
+	"github.com/ncode/ballot/internal/ballot"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -19,7 +19,7 @@ var runCmd = &cobra.Command{
 		print(viper.GetStringSlice("election.enabled"))
 		for _, name := range viper.GetStringSlice("election.enabled") {
 			fmt.Println(name)
-			b := &ballout.Ballot{}
+			b := &ballot.Ballot{}
 			err := viper.UnmarshalKey(fmt.Sprintf("election.services.%s", name), b)
 			if err != nil {
 				panic(err)

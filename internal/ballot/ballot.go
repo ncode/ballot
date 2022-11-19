@@ -1,4 +1,4 @@
-package ballout
+package ballot
 
 import (
 	election "github.com/dmitriyGarden/consul-leader-election"
