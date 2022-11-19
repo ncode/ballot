@@ -6,6 +6,7 @@ package cmd
 import (
 	"fmt"
 	"github.com/ncode/ballot/internal/ballout"
+	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -13,38 +14,28 @@ import (
 // runCmd represents the run command
 var runCmd = &cobra.Command{
 	Use:   "run",
-	Short: "A brief description of your command",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
-
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
+	Short: "Run the ballot and starts all the defined elections",
 	Run: func(cmd *cobra.Command, args []string) {
 		print(viper.GetStringSlice("election.enabled"))
 		for _, name := range viper.GetStringSlice("election.enabled") {
 			fmt.Println(name)
-			b := &ballout.Ballout{}
+			b := &ballout.Ballot{}
 			err := viper.UnmarshalKey(fmt.Sprintf("election.services.%s", name), b)
 			if err != nil {
 				panic(err)
 			}
 			b.Name = name
-			b.Run()
+			err = b.Run()
+			if err != nil {
+				log.WithFields(log.Fields{
+					"caller": "run",
+					"step":   "runCmd",
+				}).Error(err)
+			}
 		}
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(runCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// runCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// runCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }
