@@ -6,12 +6,10 @@ election:
   services:
     my_service:
       id: my_service2
-      kv: service/my_service
+      key: service/my_service
       token: 
       serviceChecks:
         - service:election2
       primaryTag: primary
       onPromote: '/usr/bin/printf promote'
       onDemote: '/usr/bin/printf demote'
-      timeout: 10
-      LockDelay: 4s

@@ -13,7 +13,7 @@ import (
 )
 
 // New returns a new Ballot instance.
-func New(name string, key string, serviceChecks []string, token string, execOnPromote string, execOnDemote string, primaryTag string, timeout time.Duration, lockDelay time.Duration) (b *Ballot, err error) {
+func New(name string, key string, serviceChecks []string, token string, execOnPromote string, execOnDemote string, primaryTag string, ttl time.Duration, lockDelay time.Duration) (b *Ballot, err error) {
 	b = &Ballot{
 		Name:          name,
 		Key:           key,
@@ -22,7 +22,7 @@ func New(name string, key string, serviceChecks []string, token string, execOnPr
 		ExecOnPromote: execOnPromote,
 		ExecOnDemote:  execOnDemote,
 		PrimaryTag:    primaryTag,
-		Timeout:       timeout,
+		TTL:           ttl,
 		LockDelay:     lockDelay,
 		client:        nil,
 	}
@@ -40,7 +40,7 @@ type Ballot struct {
 	ExecOnPromote string          `mapstructure:"execOnPromote"`
 	ExecOnDemote  string          `mapstructure:"execOnDemote"`
 	PrimaryTag    string          `mapstructure:"primaryTag"`
-	Timeout       time.Duration   `mapstructure:"timeout"`
+	TTL           time.Duration   `mapstructure:"ttl"`
 	LockDelay     time.Duration   `mapstructure:"lockDelay"`
 	sessionID     atomic.Value    `mapstructure:"-"`
 	leader        atomic.Bool     `mapstructure:"-"`
@@ -85,10 +85,6 @@ func (b *Ballot) Run() (err error) {
 		return err
 	}
 	b.client = client
-	err = b.session()
-	if err != nil {
-		return err
-	}
 	b.electionLoop()
 
 	return nil
@@ -158,33 +154,59 @@ func (b *Ballot) onPromote() (err error) {
 
 // election is responsible for the leader election.
 func (b *Ballot) election() (err error) {
-	// Check if we are the leader
+	sessionID := b.sessionID.Load()
+	if !b.leader.Load() {
+		if sessionID != nil {
+			content := &api.KVPair{
+				Key:     b.Key,
+				Session: sessionID.(string),
+				Value:   []byte(sessionID.(string)),
+			}
+			_, _, err := b.client.KV().Acquire(content, nil)
+			if err != nil {
+				log.WithFields(log.Fields{
+					"caller": "election",
+					"error":  err,
+				}).Error("failed acquire lock")
+			}
+		}
+	}
+
 	session, err := b.getSessionKey()
-	if err != nil {
-		return fmt.Errorf("unable to retrieve kv data: %s", err.Error())
-	}
-	if session == b.sessionID.Load() {
-		if !b.IsLeader() {
-			err = b.onPromote()
-			if err != nil {
-				return fmt.Errorf("failures during promotion: %s", err.Error())
+	if err == nil {
+		if sessionID != nil && session == sessionID.(string) {
+			if !b.IsLeader() {
+				err = b.onPromote()
+				if err != nil {
+					return fmt.Errorf("failures during promotion: %s", err.Error())
+				}
+			}
+		} else {
+			if b.IsLeader() {
+				err = b.onDemote()
+				if err != nil {
+					return fmt.Errorf("failures during demotion: %s", err.Error())
+				}
 			}
 		}
-	} else {
-		if b.IsLeader() {
-			err = b.onDemote()
-			if err != nil {
-				return fmt.Errorf("failures during demotion: %s", err.Error())
-			}
-		}
+		return err
 	}
-	return err
+
+	return fmt.Errorf("unable to retrieve kv data: %s", err.Error())
 }
 
 // electionLoop is the main loop for the leader election.
 func (b *Ballot) electionLoop() {
-	electionTicker := time.NewTicker(b.Timeout)
-	sessionTicker := time.NewTicker(b.Timeout / 2)
+	err := b.session()
+	if err != nil {
+		log.WithFields(log.Fields{
+			"caller": "electionLoop",
+			"error":  err,
+		}).Error("failed acquire session")
+	}
+
+	electionTicker := time.NewTicker(5 * time.Second)
+	sessionTicker := time.NewTicker(3 * time.Second)
 	for {
 		select {
 		case <-electionTicker.C:
@@ -196,23 +218,16 @@ func (b *Ballot) electionLoop() {
 				}).Error("failed to run election")
 			}
 		case <-sessionTicker.C:
-			if !b.IsLeader() {
-				sessionID := b.sessionID.Load().(string)
-				content := &api.KVPair{
-					Key:     b.Key,
-					Session: sessionID,
-					Value:   []byte(sessionID),
-				}
-				_, _, err := b.client.KV().Acquire(content, nil)
+			err := b.session()
+			if err != nil {
 				log.WithFields(log.Fields{
 					"caller": "electionLoop",
 					"error":  err,
-				}).Error("failed acquire lock")
+				}).Error("failed acquire session")
 			}
 		case <-b.ctx.Done():
 			return
 		}
-		time.Sleep(b.Timeout)
 	}
 }
 
@@ -238,21 +253,50 @@ func (b *Ballot) onDemote() (err error) {
 
 // session is responsible for creating and renewing the session.
 func (b *Ballot) session() (err error) {
+	currentSessionID := b.sessionID.Load()
+	if currentSessionID != nil {
+		sessionInfo, _, err := b.client.Session().Info(currentSessionID.(string), nil)
+		if err != nil {
+			return err
+		}
+		if sessionInfo != nil {
+			log.WithFields(log.Fields{
+				"caller":  "session",
+				"session": currentSessionID,
+			}).Trace("returning cached session")
+			return nil
+		}
+	}
 	log.WithFields(log.Fields{
 		"caller": "session",
 	}).Trace("Creating session")
+
 	sessionID, _, err := b.client.Session().Create(&api.SessionEntry{
 		Behavior:      "delete",
 		ServiceChecks: b.makeServiceCheck(b.ServiceChecks),
 		NodeChecks:    []string{"serfHealth"},
-		TTL:           b.Timeout.String(),
+		TTL:           b.TTL.String(),
 		LockDelay:     b.LockDelay,
 	}, nil)
+	if err != nil {
+		return err
+	}
+
 	log.WithFields(log.Fields{
 		"caller": "session",
 		"ID":     sessionID,
 	}).Trace("storing session ID")
 	b.sessionID.Store(sessionID)
+
+	go func() {
+		err := b.client.Session().RenewPeriodic(b.LockDelay.String(), sessionID, nil, b.ctx.Done())
+		if err != nil {
+			log.WithFields(log.Fields{
+				"caller": "session",
+				"error":  err,
+			}).Error("failed to renew session")
+		}
+	}()
 	return err
 }
 

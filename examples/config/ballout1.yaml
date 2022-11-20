@@ -13,5 +13,3 @@ election:
       primaryTag: primary
       onPromote: '/usr/bin/printf promote'
       onDemote: '/usr/bin/printf demote'
-      timeout: 10
-      LockDelay: 4s
