@@ -3,12 +3,13 @@ module github.com/ncode/ballot
 go 1.19
 
 require (
-	github.com/dmitriyGarden/consul-leader-election v1.2.2
+	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
 	github.com/hashicorp/consul/api v1.15.3
 	github.com/sirupsen/logrus v1.4.2
 	github.com/spf13/cobra v1.6.1
 	github.com/spf13/viper v1.14.0
 	golang.org/x/exp v0.0.0-20221114191408-850992195362
+	golang.org/x/net v0.0.0-20221014081412-f15817d10f9b
 )
 
 require (
