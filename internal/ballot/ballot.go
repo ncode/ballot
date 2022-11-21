@@ -158,7 +158,7 @@ func (b *Ballot) onPromote() (err error) {
 	err = b.updateServiceTags()
 	if err != nil {
 		b.releaseSession()
-		return err
+		return fmt.Errorf("failed to update service tags: %s", err)
 	}
 	if b.ExecOnPromote != "" {
 		out, err := b.runCommand(b.ExecOnPromote)
@@ -175,6 +175,17 @@ func (b *Ballot) onPromote() (err error) {
 
 // election is responsible for the leader election.
 func (b *Ballot) election() (err error) {
+	err = b.session()
+	if err != nil {
+		if b.leader.Load() {
+			err := b.onDemote()
+			if err != nil {
+				return fmt.Errorf("failed to validate session as leader, forcing demotion: %s", err.Error())
+			}
+		}
+		return fmt.Errorf("failed to create session: %s", err)
+	}
+
 	if !b.leader.Load() {
 		if b.sessionID.Load() != nil {
 			service, err := b.getService()
@@ -252,13 +263,7 @@ func (b *Ballot) electionLoop() {
 				}).Error("failed to run election")
 			}
 		case <-sessionTicker.C:
-			err := b.session()
-			if err != nil {
-				log.WithFields(log.Fields{
-					"caller": "electionLoop",
-					"error":  err,
-				}).Error("failed acquire session")
-			}
+
 		case <-b.ctx.Done():
 			return
 		}
@@ -301,10 +306,17 @@ func (b *Ballot) session() (err error) {
 			return nil
 		}
 	}
+	state, _, err := b.client.Agent().AgentHealthServiceByName(b.Name)
+	if err != nil {
+		return fmt.Errorf("failed to get health checks: %s", err)
+	}
+	if state == "critical" {
+		return fmt.Errorf("service is in critical state, so I won't even try to create a session")
+	}
+
 	log.WithFields(log.Fields{
 		"caller": "session",
-	}).Trace("Creating session")
-
+	}).Trace("creating session")
 	sessionID, _, err := b.client.Session().Create(&api.SessionEntry{
 		Behavior:      "delete",
 		ServiceChecks: b.makeServiceCheck(b.ServiceChecks),
@@ -366,7 +378,7 @@ func (b *Ballot) getSessionKey() (session string, err error) {
 	return sessionKey.Session, nil
 }
 
-// relaseSession releases the session.
+// releaseSession releases the session.
 func (b *Ballot) releaseSession() (err error) {
 	if b.sessionID.Load() == nil {
 		return nil
