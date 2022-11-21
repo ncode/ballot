@@ -1,6 +1,7 @@
 package ballot
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/google/shlex"
 	"github.com/hashicorp/consul/api"
@@ -11,6 +12,12 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+type ElectionPayload struct {
+	Address   string
+	Port      int
+	SessionID string
+}
 
 // New returns a new Ballot instance.
 func New(name string, key string, serviceChecks []string, token string, execOnPromote string, execOnDemote string, primaryTag string, ttl time.Duration, lockDelay time.Duration) (b *Ballot, err error) {
@@ -90,15 +97,27 @@ func (b *Ballot) Run() (err error) {
 	return nil
 }
 
-// updateServiceTags updates the service tags.
-func (b *Ballot) updateServiceTags() error {
+// getService returns the registered service.
+func (b *Ballot) getService() (service *api.AgentService, err error) {
 	agent := b.client.Agent()
 	services, err := agent.Services()
 	if err != nil {
+		return service, err
+	}
+	service, ok := services[b.ID]
+	if !ok {
+		return service, fmt.Errorf("service %s not found", b.ID)
+	}
+	return service, err
+}
+
+// updateServiceTags updates the service tags.
+func (b *Ballot) updateServiceTags() error {
+	service, err := b.getService()
+	if err != nil {
 		return err
 	}
-
-	registration := b.copyServiceToRegistration(services[b.ID])
+	registration := b.copyServiceToRegistration(service)
 	log.WithFields(log.Fields{
 		"caller":  "updateServiceTags",
 		"service": b.ID,
@@ -124,6 +143,7 @@ func (b *Ballot) updateServiceTags() error {
 		}).Debug("new service tags")
 	}
 
+	agent := b.client.Agent()
 	err = agent.ServiceRegister(registration)
 	if err != nil {
 		return err
@@ -137,6 +157,7 @@ func (b *Ballot) onPromote() (err error) {
 	b.leader.Store(true)
 	err = b.updateServiceTags()
 	if err != nil {
+		b.releaseSession()
 		return err
 	}
 	if b.ExecOnPromote != "" {
@@ -154,27 +175,40 @@ func (b *Ballot) onPromote() (err error) {
 
 // election is responsible for the leader election.
 func (b *Ballot) election() (err error) {
-	sessionID := b.sessionID.Load()
 	if !b.leader.Load() {
-		if sessionID != nil {
+		if b.sessionID.Load() != nil {
+			service, err := b.getService()
+			if err != nil {
+				return fmt.Errorf("failed to get service: %s", err)
+			}
+
+			electionPayload := &ElectionPayload{
+				Address:   service.Address,
+				Port:      service.Port,
+				SessionID: b.sessionID.Load().(string),
+			}
+
+			payload, err := json.Marshal(electionPayload)
+			if err != nil {
+				return fmt.Errorf("failed to marshal election payload: %s", err)
+			}
+
 			content := &api.KVPair{
 				Key:     b.Key,
-				Session: sessionID.(string),
-				Value:   []byte(sessionID.(string)),
+				Session: b.sessionID.Load().(string),
+				Value:   payload,
 			}
-			_, _, err := b.client.KV().Acquire(content, nil)
+
+			_, _, err = b.client.KV().Acquire(content, nil)
 			if err != nil {
-				log.WithFields(log.Fields{
-					"caller": "election",
-					"error":  err,
-				}).Error("failed acquire lock")
+				return fmt.Errorf("failed to acquire lock: %s", err)
 			}
 		}
 	}
 
 	session, err := b.getSessionKey()
 	if err == nil {
-		if sessionID != nil && session == sessionID.(string) {
+		if b.sessionID.Load() != nil && session == b.sessionID.Load().(string) {
 			if !b.IsLeader() {
 				err = b.onPromote()
 				if err != nil {
@@ -253,9 +287,9 @@ func (b *Ballot) onDemote() (err error) {
 
 // session is responsible for creating and renewing the session.
 func (b *Ballot) session() (err error) {
-	currentSessionID := b.sessionID.Load()
-	if currentSessionID != nil {
-		sessionInfo, _, err := b.client.Session().Info(currentSessionID.(string), nil)
+	if b.sessionID.Load() != nil {
+		currentSessionID := b.sessionID.Load().(string)
+		sessionInfo, _, err := b.client.Session().Info(currentSessionID, nil)
 		if err != nil {
 			return err
 		}
@@ -294,7 +328,7 @@ func (b *Ballot) session() (err error) {
 			log.WithFields(log.Fields{
 				"caller": "session",
 				"error":  err,
-			}).Error("failed to renew session")
+			}).Warning("failed to renew session")
 		}
 	}()
 	return err
@@ -318,7 +352,7 @@ func (b *Ballot) makeServiceCheck(sc []string) (serviceChecks []api.ServiceCheck
 }
 
 func (b *Ballot) IsLeader() bool {
-	return b.leader.Load()
+	return b.leader.Load() && b.sessionID.Load() != nil
 }
 
 func (b *Ballot) getSessionKey() (session string, err error) {
@@ -330,4 +364,18 @@ func (b *Ballot) getSessionKey() (session string, err error) {
 		return session, err
 	}
 	return sessionKey.Session, nil
+}
+
+// relaseSession releases the session.
+func (b *Ballot) releaseSession() (err error) {
+	if b.sessionID.Load() == nil {
+		return nil
+	}
+	sessionID := b.sessionID.Load().(string)
+	_, err = b.client.Session().Destroy(sessionID, nil)
+	if err != nil {
+		return err
+	}
+	b.sessionID.Store(nil)
+	return err
 }
