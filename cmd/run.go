@@ -17,9 +17,7 @@ var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run the ballot and starts all the defined elections",
 	Run: func(cmd *cobra.Command, args []string) {
-		print(viper.GetStringSlice("election.enabled"))
 		for _, name := range viper.GetStringSlice("election.enabled") {
-			fmt.Println(name)
 			b := &ballot.Ballot{}
 			err := viper.UnmarshalKey(fmt.Sprintf("election.services.%s", name), b)
 			if err != nil {

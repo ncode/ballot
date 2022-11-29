@@ -94,11 +94,13 @@ func (b *Ballot) Run() (err error) {
 	}
 	b.client = client
 	go func() {
-		err := b.watch()
-		if err != nil {
-			log.WithFields(log.Fields{
-				"caller": "watch",
-			}).Error(err)
+		for {
+			err := b.watch()
+			if err != nil {
+				log.WithFields(log.Fields{
+					"caller": "watch",
+				}).Error(err)
+			}
 		}
 	}()
 	b.electionLoop()
@@ -399,13 +401,53 @@ func (b *Ballot) watch() error {
 		return err
 	}
 	wp.Handler = func(idx uint64, data interface{}) {
-		// Create the command
-		//var buf bytes.Buffer
-		//var err error
-
-		fmt.Printf("Index: %d Data: %v\n", idx, data)
-
-		return
+		electionPayload := &ElectionPayload{}
+		response, ok := data.(*api.KVPair)
+		if !ok {
+			return
+		}
+		err = json.Unmarshal(response.Value, electionPayload)
+		if err != nil {
+			log.WithFields(log.Fields{
+				"caller": "watch",
+				"error":  err,
+			}).Error("failed to unmarshal election payload")
+		}
+		if b.sessionID.Load() != nil && (electionPayload.SessionID == b.sessionID.Load().(string)) {
+			if b.ExecOnPromote != "" {
+				log.WithFields(log.Fields{
+					"caller": "watch",
+				}).Info("executing command on promote")
+				out, err := b.runCommand(b.ExecOnPromote)
+				if err != nil {
+					log.WithFields(log.Fields{
+						"caller": "watch",
+						"error":  err,
+					}).Error("failed to execute command on promote")
+				}
+				log.WithFields(log.Fields{
+					"caller": "watch",
+					"output": out,
+				}).Info("command executed on promote")
+			}
+		} else {
+			if b.ExecOnDemote != "" {
+				log.WithFields(log.Fields{
+					"caller": "watch",
+				}).Info("executing command on demote")
+				out, err := b.runCommand(b.ExecOnDemote)
+				if err != nil {
+					log.WithFields(log.Fields{
+						"caller": "watch",
+						"error":  err,
+					}).Error("failed to execute command on demote")
+				}
+				log.WithFields(log.Fields{
+					"caller": "watch",
+					"output": out,
+				}).Info("command executed on demote")
+			}
+		}
 	}
 
 	if err := wp.RunWithClientAndHclog(b.client, nil); err != nil {
