@@ -93,16 +93,6 @@ func (b *Ballot) Run() (err error) {
 		return err
 	}
 	b.client = client
-	go func() {
-		for {
-			err := b.watch()
-			if err != nil {
-				log.WithFields(log.Fields{
-					"caller": "watch",
-				}).Error(err)
-			}
-		}
-	}()
 	b.electionLoop()
 
 	return nil
@@ -324,6 +314,15 @@ func (b *Ballot) session() (err error) {
 		"ID":     sessionID,
 	}).Trace("storing session ID")
 	b.sessionID.Store(sessionID)
+
+	go func() {
+		err := b.watch()
+		if err != nil {
+			log.WithFields(log.Fields{
+				"caller": "watch",
+			}).Error(err)
+		}
+	}()
 
 	go func() {
 		err := b.client.Session().RenewPeriodic(b.LockDelay.String(), sessionID, nil, b.ctx.Done())

@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"os"
+	"time"
 )
 
 // runCmd represents the run command
@@ -24,6 +25,12 @@ var runCmd = &cobra.Command{
 				panic(err)
 			}
 			b.Name = name
+			if b.LockDelay == 0 {
+				b.LockDelay = 3 * time.Second
+			}
+			if b.TTL == 0 {
+				b.TTL = 10 * time.Second
+			}
 			err = b.Run()
 			if err != nil {
 				log.WithFields(log.Fields{
