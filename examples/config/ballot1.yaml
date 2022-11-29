@@ -2,11 +2,11 @@ consul:
   token: 
 election:
   enabled:
-    - my_service
+    - my-service
   services:
     my_service:
-      id: my_service1
-      key: service/my_service
+      id: my-service1
+      key: service/my-service
       token: 
       serviceChecks:
         - service:election1

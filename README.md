@@ -19,13 +19,13 @@ $ go build
 2. Run consul in dev mode and register two services
 ```bash
 $ consul agent -dev -enable-script-checks=true &
-$ curl --request PUT --data @examples/consul/my_service1.json http://127.0.0.1:8500/v1/agent/service/register\?replace-existing-checks\=true
-$ curl --request PUT --data @examples/consul/my_service2.json http://127.0.0.1:8500/v1/agent/service/register\?replace-existing-checks\=true
+$ curl --request PUT --data @examples/consul/my-service1.json http://127.0.0.1:8500/v1/agent/service/register\?replace-existing-checks\=true
+$ curl --request PUT --data @examples/consul/my-service2.json http://127.0.0.1:8500/v1/agent/service/register\?replace-existing-checks\=true
 ```
 3. Run one instance of Ballot for each service
 ```bash
-$ ./ballot run --config $PWD/examples/config/ballout1.yaml &
-$ ./ballot run --config $PWD/examples/config/ballout2.yaml &
+$ ./ballot run --config $PWD/examples/config/ballot1.yaml &
+$ ./ballot run --config $PWD/examples/config/ballot2.yaml &
 ```
 4. Open consul ui http://127.0.0.1:8500/ui/dc1/services/my_service/instances
 5. Play with the health checks and see the election happening and moving

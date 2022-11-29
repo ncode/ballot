@@ -1,6 +1,6 @@
 {
-  "ID": "my_service1",
-  "Name": "my_service",
+  "ID": "my-service1",
+  "Name": "my-service",
   "Tags": ["v1"],
   "Address": "127.0.0.1",
   "Port": 8000,
