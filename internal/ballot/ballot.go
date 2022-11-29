@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/google/shlex"
 	"github.com/hashicorp/consul/api"
+	"github.com/hashicorp/consul/api/watch"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/exp/slices"
 	"golang.org/x/net/context"
@@ -92,6 +93,14 @@ func (b *Ballot) Run() (err error) {
 		return err
 	}
 	b.client = client
+	go func() {
+		err := b.watch()
+		if err != nil {
+			log.WithFields(log.Fields{
+				"caller": "watch",
+			}).Error(err)
+		}
+	}()
 	b.electionLoop()
 
 	return nil
@@ -159,16 +168,6 @@ func (b *Ballot) onPromote() (err error) {
 	if err != nil {
 		b.releaseSession()
 		return fmt.Errorf("failed to update service tags: %s", err)
-	}
-	if b.ExecOnPromote != "" {
-		out, err := b.runCommand(b.ExecOnPromote)
-		if err != nil {
-			return err
-		}
-		log.WithFields(log.Fields{
-			"state":  "leader",
-			"caller": "OnPromote",
-		}).Info(string(out))
 	}
 	return err
 }
@@ -277,16 +276,6 @@ func (b *Ballot) onDemote() (err error) {
 	if err != nil {
 		return err
 	}
-	if b.ExecOnDemote != "" {
-		out, err := b.runCommand(b.ExecOnDemote)
-		if err != nil {
-			return err
-		}
-		log.WithFields(log.Fields{
-			"state":  "follower",
-			"caller": "OnDemote",
-		}).Info(string(out))
-	}
 	return err
 }
 
@@ -389,5 +378,39 @@ func (b *Ballot) releaseSession() (err error) {
 		return err
 	}
 	b.sessionID.Store(nil)
+	return err
+}
+
+// watch is responsible for watching the key and run a command when notified by changes
+func (b *Ballot) watch() error {
+	log.WithFields(log.Fields{
+		"caller": "watch",
+	}).Trace("watching key")
+	params := make(map[string]interface{})
+	params["type"] = "key"
+	params["key"] = b.Key
+	if b.Token != "" {
+		params["token"] = b.Token
+	}
+
+	// Watch for changes
+	wp, err := watch.Parse(params)
+	if err != nil {
+		return err
+	}
+	wp.Handler = func(idx uint64, data interface{}) {
+		// Create the command
+		//var buf bytes.Buffer
+		//var err error
+
+		fmt.Printf("Index: %d Data: %v\n", idx, data)
+
+		return
+	}
+
+	if err := wp.RunWithClientAndHclog(b.client, nil); err != nil {
+		return err
+	}
+
 	return err
 }
