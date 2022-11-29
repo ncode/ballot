@@ -1,0 +1,15 @@
+consul:
+  token: 
+election:
+  enabled:
+    - my-service
+  services:
+    my_service:
+      id: my-service1
+      key: service/my-service
+      token: 
+      serviceChecks:
+        - service:election1
+      primaryTag: primary
+      execOnPromote: '/usr/bin/say I am da boss'
+      execOnDemote: '/usr/bin/say I am no longer da boss'

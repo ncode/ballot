@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"os"
+	"time"
 )
 
 // runCmd represents the run command
@@ -17,15 +18,19 @@ var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run the ballot and starts all the defined elections",
 	Run: func(cmd *cobra.Command, args []string) {
-		print(viper.GetStringSlice("election.enabled"))
 		for _, name := range viper.GetStringSlice("election.enabled") {
-			fmt.Println(name)
 			b := &ballot.Ballot{}
 			err := viper.UnmarshalKey(fmt.Sprintf("election.services.%s", name), b)
 			if err != nil {
 				panic(err)
 			}
 			b.Name = name
+			if b.LockDelay == 0 {
+				b.LockDelay = 3 * time.Second
+			}
+			if b.TTL == 0 {
+				b.TTL = 10 * time.Second
+			}
 			err = b.Run()
 			if err != nil {
 				log.WithFields(log.Fields{

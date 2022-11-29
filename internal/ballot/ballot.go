@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/google/shlex"
 	"github.com/hashicorp/consul/api"
+	"github.com/hashicorp/consul/api/watch"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/exp/slices"
 	"golang.org/x/net/context"
@@ -160,16 +161,6 @@ func (b *Ballot) onPromote() (err error) {
 		b.releaseSession()
 		return fmt.Errorf("failed to update service tags: %s", err)
 	}
-	if b.ExecOnPromote != "" {
-		out, err := b.runCommand(b.ExecOnPromote)
-		if err != nil {
-			return err
-		}
-		log.WithFields(log.Fields{
-			"state":  "leader",
-			"caller": "OnPromote",
-		}).Info(string(out))
-	}
 	return err
 }
 
@@ -277,16 +268,6 @@ func (b *Ballot) onDemote() (err error) {
 	if err != nil {
 		return err
 	}
-	if b.ExecOnDemote != "" {
-		out, err := b.runCommand(b.ExecOnDemote)
-		if err != nil {
-			return err
-		}
-		log.WithFields(log.Fields{
-			"state":  "follower",
-			"caller": "OnDemote",
-		}).Info(string(out))
-	}
 	return err
 }
 
@@ -333,6 +314,15 @@ func (b *Ballot) session() (err error) {
 		"ID":     sessionID,
 	}).Trace("storing session ID")
 	b.sessionID.Store(sessionID)
+
+	go func() {
+		err := b.watch()
+		if err != nil {
+			log.WithFields(log.Fields{
+				"caller": "watch",
+			}).Error(err)
+		}
+	}()
 
 	go func() {
 		err := b.client.Session().RenewPeriodic(b.LockDelay.String(), sessionID, nil, b.ctx.Done())
@@ -389,5 +379,79 @@ func (b *Ballot) releaseSession() (err error) {
 		return err
 	}
 	b.sessionID.Store(nil)
+	return err
+}
+
+// watch is responsible for watching the key and run a command when notified by changes
+func (b *Ballot) watch() error {
+	log.WithFields(log.Fields{
+		"caller": "watch",
+	}).Trace("watching key")
+	params := make(map[string]interface{})
+	params["type"] = "key"
+	params["key"] = b.Key
+	if b.Token != "" {
+		params["token"] = b.Token
+	}
+
+	// Watch for changes
+	wp, err := watch.Parse(params)
+	if err != nil {
+		return err
+	}
+	wp.Handler = func(idx uint64, data interface{}) {
+		electionPayload := &ElectionPayload{}
+		response, ok := data.(*api.KVPair)
+		if !ok {
+			return
+		}
+		err = json.Unmarshal(response.Value, electionPayload)
+		if err != nil {
+			log.WithFields(log.Fields{
+				"caller": "watch",
+				"error":  err,
+			}).Error("failed to unmarshal election payload")
+		}
+		if b.sessionID.Load() != nil && (electionPayload.SessionID == b.sessionID.Load().(string)) {
+			if b.ExecOnPromote != "" {
+				log.WithFields(log.Fields{
+					"caller": "watch",
+				}).Info("executing command on promote")
+				out, err := b.runCommand(b.ExecOnPromote)
+				if err != nil {
+					log.WithFields(log.Fields{
+						"caller": "watch",
+						"error":  err,
+					}).Error("failed to execute command on promote")
+				}
+				log.WithFields(log.Fields{
+					"caller": "watch",
+					"output": out,
+				}).Info("command executed on promote")
+			}
+		} else {
+			if b.ExecOnDemote != "" {
+				log.WithFields(log.Fields{
+					"caller": "watch",
+				}).Info("executing command on demote")
+				out, err := b.runCommand(b.ExecOnDemote)
+				if err != nil {
+					log.WithFields(log.Fields{
+						"caller": "watch",
+						"error":  err,
+					}).Error("failed to execute command on demote")
+				}
+				log.WithFields(log.Fields{
+					"caller": "watch",
+					"output": out,
+				}).Info("command executed on demote")
+			}
+		}
+	}
+
+	if err := wp.RunWithClientAndHclog(b.client, nil); err != nil {
+		return err
+	}
+
 	return err
 }
