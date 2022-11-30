@@ -57,7 +57,7 @@ type Ballot struct {
 }
 
 // runCommand runs a command and returns the output.
-func (b *Ballot) runCommand(command string) ([]byte, error) {
+func (b *Ballot) runCommand(command string, electionPayload *ElectionPayload) ([]byte, error) {
 	log.WithFields(log.Fields{
 		"caller": "runCommand",
 	}).Info("Running command: ", command)
@@ -66,6 +66,9 @@ func (b *Ballot) runCommand(command string) ([]byte, error) {
 		return nil, err
 	}
 	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Env = append(cmd.Env, fmt.Sprintf("ADDRESS=%s", electionPayload.Address))
+	cmd.Env = append(cmd.Env, fmt.Sprintf("PORT=%d", electionPayload.Port))
+	cmd.Env = append(cmd.Env, fmt.Sprintf("SESSIONID=%d", electionPayload.SessionID))
 	return cmd.Output()
 }
 
@@ -417,7 +420,7 @@ func (b *Ballot) watch() error {
 				log.WithFields(log.Fields{
 					"caller": "watch",
 				}).Info("executing command on promote")
-				out, err := b.runCommand(b.ExecOnPromote)
+				out, err := b.runCommand(b.ExecOnPromote, electionPayload)
 				if err != nil {
 					log.WithFields(log.Fields{
 						"caller": "watch",
@@ -434,7 +437,7 @@ func (b *Ballot) watch() error {
 				log.WithFields(log.Fields{
 					"caller": "watch",
 				}).Info("executing command on demote")
-				out, err := b.runCommand(b.ExecOnDemote)
+				out, err := b.runCommand(b.ExecOnDemote, electionPayload)
 				if err != nil {
 					log.WithFields(log.Fields{
 						"caller": "watch",
