@@ -5,9 +5,9 @@ Consul service election with tagging support and hooks
 ### What is it?
 
 Consul doesn't support leader election for registered services. This tool is meant to help with that.
-The idea is that you have multiple services and you need to select a leader. It will apply a tag of choise to the leader and
-when a election happens you can hook a script execution.
-Something like a very, very simplified idea of keepalived using consul.
+The idea is that you have multiple services and you need to select a leader. It will apply a tag of choise
+to the leader and when a election happens you can hook a script execution.
+This tool can be very useful for setups that require a leader service, but do not offer a leader election out of the box.
 
 ### How do I test it?
 
@@ -45,18 +45,13 @@ $ cp /bin/ls /tmp/lalala2
 
 During the call of execOnPromote and execOnDemote a few environment variables are injected incase you need to use the and port of the service for an intended automation.
 
-ADDRESS   - IP Address of the current service elected
-PORT      - Port of the service
-SESSIONID - Current SessionID of the elected master
-
-### Current state of this project?
-
-Works on my machine.
+```bash
+$ADDRESS   # IP Address of the current service elected
+$PORT      # Port of the service
+$SESSIONID # Current SessionID of the elected master
+```
 
 ### TODO:
 
-- Testing using Consul Token
 - Write tests
-- Add a proper help for the cli
-- Cleanup the code and test with a real consul setup
-- Allow to pre-define the preferred leader service like on keepalived
+- Allow to pre-define the preferred leader
