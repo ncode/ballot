@@ -1,0 +1,26 @@
+[Unit]
+Description=Consul based leader election with tagging support and hooks
+After=network.target local-fs.target remote-fs.target nss-lookup.target time-sync.target
+
+[Service]
+User=ballot
+Group=ballot
+ProtectSystem=full
+PrivateTmp=yes
+PrivateDevices=yes
+EnvironmentFile=-/etc/sysconfig/ballot
+ExecStart=/usr/bin/ballot run --config=/etc/ballot/ballot.yaml $CMD_OPTS
+ExecReload=/bin/kill -s HUP $MAINPID
+KillMode=process
+KillSignal=SIGINT
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StartLimitInterval=60
+StartLimitBurst=3
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+SyslogIdentifier=ballot
+
+[Install]
+WantedBy=multi-user.target
