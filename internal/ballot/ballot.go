@@ -68,7 +68,7 @@ func (b *Ballot) runCommand(command string, electionPayload *ElectionPayload) ([
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("ADDRESS=%s", electionPayload.Address))
 	cmd.Env = append(cmd.Env, fmt.Sprintf("PORT=%d", electionPayload.Port))
-	cmd.Env = append(cmd.Env, fmt.Sprintf("SESSIONID=%d", electionPayload.SessionID))
+	cmd.Env = append(cmd.Env, fmt.Sprintf("SESSIONID=%s", electionPayload.SessionID))
 	return cmd.Output()
 }
 
