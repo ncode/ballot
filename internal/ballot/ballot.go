@@ -39,7 +39,14 @@ type ElectionPayload struct {
 }
 
 // New returns a new Ballot instance.
-func New(name string, key string, serviceChecks []string, token string, execOnPromote string, execOnDemote string, primaryTag string, ttl time.Duration, lockDelay time.Duration) (b *Ballot, err error) {
+func New(ctx context.Context, name string, key string, serviceChecks []string, token string, execOnPromote string, execOnDemote string, primaryTag string, ttl time.Duration, lockDelay time.Duration) (b *Ballot, err error) {
+	consulConfig := api.DefaultConfig()
+	consulConfig.Token = b.Token
+	client, err := api.NewClient(consulConfig)
+	if err != nil {
+		return nil, err
+	}
+
 	b = &Ballot{
 		Name:          name,
 		Key:           key,
@@ -50,9 +57,9 @@ func New(name string, key string, serviceChecks []string, token string, execOnPr
 		PrimaryTag:    primaryTag,
 		TTL:           ttl,
 		LockDelay:     lockDelay,
-		client:        nil,
+		client:        client,
 		exec:          &commandExecutor{},
-		ctx:           context.Background(),
+		ctx:           ctx,
 	}
 
 	return b, err
@@ -130,21 +137,6 @@ func (b *Ballot) copyCatalogServiceToRegistration(service *api.CatalogService) *
 			EnableTagOverride: service.ServiceEnableTagOverride,
 		},
 	}
-}
-
-// Run starts the leader election.
-func (b *Ballot) Run() (err error) {
-	b.ctx = context.Background()
-	consulConfig := api.DefaultConfig()
-	consulConfig.Token = b.Token
-	client, err := api.NewClient(consulConfig)
-	if err != nil {
-		return err
-	}
-	b.client = client
-	b.electionLoop()
-
-	return nil
 }
 
 // getService returns the registered service.
@@ -240,7 +232,7 @@ func (b *Ballot) cleanup() error {
 }
 
 // onPromote is called when the node is promoted to leader.
-func (b *Ballot) onPromote() (err error) {
+func (b *Ballot) onPromote(electionPayload *ElectionPayload) (err error) {
 	b.leader.Store(true)
 	err = b.updateServiceTags()
 	if err != nil {
@@ -252,16 +244,44 @@ func (b *Ballot) onPromote() (err error) {
 		b.releaseSession()
 		return fmt.Errorf("failed to cleanup old service tags: %s", err)
 	}
+	if b.ExecOnPromote != "" {
+		log.WithFields(log.Fields{
+			"caller":  "executePromoteCommand",
+			"command": b.ExecOnPromote,
+		}).Info("Executing promote command")
+		if out, err := b.runCommand(b.ExecOnPromote, electionPayload); err != nil {
+			log.WithFields(log.Fields{
+				"caller": "executePromoteCommand",
+				"error":  err,
+			}).Error("Failed to execute promote command")
+		} else {
+			log.WithFields(log.Fields{
+				"caller": "executePromoteCommand",
+				"output": string(out),
+			}).Info("Promote command executed successfully")
+		}
+	}
 	return err
 }
 
 // election is responsible for the leader election.
 func (b *Ballot) election() (err error) {
+	service, _, err := b.getService()
+	if err != nil {
+		return fmt.Errorf("failed to get service: %s", err)
+	}
+
+	electionPayload := &ElectionPayload{
+		Address:   service.Address,
+		Port:      service.Port,
+		SessionID: b.sessionID.Load().(string),
+	}
+
 	err = b.session()
 	if err != nil {
 		fmt.Println("here Juliano")
 		if b.leader.Load() {
-			err := b.onDemote()
+			err := b.onDemote(electionPayload)
 			if err != nil {
 				return fmt.Errorf("failed to validate session as leader, forcing demotion: %s", err.Error())
 			}
@@ -271,17 +291,6 @@ func (b *Ballot) election() (err error) {
 
 	if !b.leader.Load() {
 		if b.sessionID.Load() != nil {
-			service, _, err := b.getService()
-			if err != nil {
-				return fmt.Errorf("failed to get service: %s", err)
-			}
-
-			electionPayload := &ElectionPayload{
-				Address:   service.Address,
-				Port:      service.Port,
-				SessionID: b.sessionID.Load().(string),
-			}
-
 			payload, err := json.Marshal(electionPayload)
 			if err != nil {
 				return fmt.Errorf("failed to marshal election payload: %s", err)
@@ -304,14 +313,14 @@ func (b *Ballot) election() (err error) {
 	if err == nil {
 		if b.sessionID.Load() != nil && session == b.sessionID.Load().(string) {
 			if !b.IsLeader() {
-				err = b.onPromote()
+				err = b.onPromote(electionPayload)
 				if err != nil {
 					return fmt.Errorf("failures during promotion: %s", err.Error())
 				}
 			}
 		} else {
 			if b.IsLeader() {
-				err = b.onDemote()
+				err = b.onDemote(electionPayload)
 				if err != nil {
 					return fmt.Errorf("failures during demotion: %s", err.Error())
 				}
@@ -323,14 +332,15 @@ func (b *Ballot) election() (err error) {
 	return fmt.Errorf("unable to retrieve kv data: %s", err.Error())
 }
 
-// electionLoop is the main loop for the leader election.
-func (b *Ballot) electionLoop() {
-	err := b.session()
+// Run is the main loop for the leader election.
+func (b *Ballot) Run() (err error) {
+	err = b.session()
 	if err != nil {
 		log.WithFields(log.Fields{
-			"caller": "electionLoop",
+			"caller": "Run",
 			"error":  err,
 		}).Error("failed acquire session")
+		return err
 	}
 
 	electionTicker := time.NewTicker(5 * time.Second)
@@ -340,22 +350,39 @@ func (b *Ballot) electionLoop() {
 			err := b.election()
 			if err != nil {
 				log.WithFields(log.Fields{
-					"caller": "electionLoop",
+					"caller": "Run",
 					"error":  err,
 				}).Error("failed to run election")
 			}
 		case <-b.ctx.Done():
-			return
+			return err
 		}
 	}
 }
 
 // onDemote is called when the node is demoted from leader.
-func (b *Ballot) onDemote() (err error) {
+func (b *Ballot) onDemote(electionPayload *ElectionPayload) (err error) {
 	b.leader.Store(false)
 	err = b.updateServiceTags()
 	if err != nil {
 		return err
+	}
+	if b.ExecOnDemote != "" {
+		log.WithFields(log.Fields{
+			"caller":  "executeDemoteCommand",
+			"command": b.ExecOnDemote,
+		}).Info("Executing demote command")
+		if out, err := b.runCommand(b.ExecOnDemote, electionPayload); err != nil {
+			log.WithFields(log.Fields{
+				"caller": "executeDemoteCommand",
+				"error":  err,
+			}).Error("Failed to execute demote command")
+		} else {
+			log.WithFields(log.Fields{
+				"caller": "executeDemoteCommand",
+				"output": string(out),
+			}).Info("Demote command executed successfully")
+		}
 	}
 	return err
 }
@@ -404,12 +431,12 @@ func (b *Ballot) session() (err error) {
 	}).Trace("storing session ID")
 	b.sessionID.Store(sessionID)
 
-	err = b.watch()
-	if err != nil {
-		log.WithFields(log.Fields{
-			"caller": "watch",
-		}).Error(err)
-	}
+	// err = b.watch()
+	// if err != nil {
+	// 	log.WithFields(log.Fields{
+	// 		"caller": "watch",
+	// 	}).Error(err)
+	// }
 
 	go func() {
 		err := b.client.Session().RenewPeriodic(b.LockDelay.String(), sessionID, nil, b.ctx.Done())
@@ -508,7 +535,7 @@ func (b *Ballot) watch() error {
 	}
 
 	go func() {
-		if err := wp.RunWithClientAndHclog(b.client, nil); err != nil {
+		if err := wp.RunWithClientAndHclog(b.client.(*api.Client), nil); err != nil {
 			log.WithFields(log.Fields{
 				"caller": "watch",
 				"error":  err,
