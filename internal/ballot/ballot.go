@@ -366,6 +366,7 @@ func (b *Ballot) session() (err error) {
 		return fmt.Errorf("failed to get health checks: %s", err)
 	}
 	if state == "critical" {
+		defer b.cleanup()
 		return fmt.Errorf("service is in critical state, so I won't even try to create a session")
 	}
 
