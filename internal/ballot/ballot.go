@@ -19,6 +19,13 @@ type CommandExecutor interface {
 	Command(name string, arg ...string) *exec.Cmd
 }
 
+type ConsulClient interface {
+	Agent() *api.Agent
+	Catalog() *api.Catalog
+	KV() *api.KV
+	Session() *api.Session
+}
+
 type commandExecutor struct{}
 
 func (e *commandExecutor) Command(name string, arg ...string) *exec.Cmd {
@@ -45,6 +52,7 @@ func New(name string, key string, serviceChecks []string, token string, execOnPr
 		LockDelay:     lockDelay,
 		client:        nil,
 		exec:          &commandExecutor{},
+		ctx:           context.Background(),
 	}
 
 	return b, err
@@ -64,7 +72,7 @@ type Ballot struct {
 	LockDelay     time.Duration   `mapstructure:"lockDelay"`
 	sessionID     atomic.Value    `mapstructure:"-"`
 	leader        atomic.Bool     `mapstructure:"-"`
-	client        *api.Client     `mapstructure:"-"`
+	client        ConsulClient    `mapstructure:"-"`
 	ctx           context.Context `mapstructure:"-"`
 	exec          CommandExecutor `mapstructure:"-"`
 }
@@ -201,21 +209,21 @@ func (b *Ballot) cleanup() error {
 	if err != nil {
 		return err
 	}
-	for _, catcatalogService := range catalogServices {
-		if catcatalogService.Address != service.Address {
-			p := slices.Index(catcatalogService.ServiceTags, b.PrimaryTag)
+	for _, catalogService := range catalogServices {
+		if catalogService.Address != service.Address {
+			p := slices.Index(catalogService.ServiceTags, b.PrimaryTag)
 			if p == -1 {
 				return nil
 			}
 			log.WithFields(log.Fields{
 				"caller":  "cleanupCatalogServiceTags",
 				"service": b.ID,
-				"node":    catcatalogService.Node,
-				"tags":    catcatalogService.ServiceTags,
+				"node":    catalogService.Node,
+				"tags":    catalogService.ServiceTags,
 			}).Debug("current service tags")
-			catcatalogService.ServiceTags = slices.Delete(catcatalogService.ServiceTags, p, p+1)
+			catalogService.ServiceTags = slices.Delete(catalogService.ServiceTags, p, p+1)
 			catalog := b.client.Catalog()
-			reg := b.copyCatalogServiceToRegistration(catcatalogService)
+			reg := b.copyCatalogServiceToRegistration(catalogService)
 			_, err := catalog.Register(reg, &api.WriteOptions{})
 			if err != nil {
 				return err
@@ -223,8 +231,8 @@ func (b *Ballot) cleanup() error {
 			log.WithFields(log.Fields{
 				"caller":  "cleanupCatalogServiceTags",
 				"service": b.ID,
-				"node":    catcatalogService.Node,
-				"tags":    catcatalogService.ServiceTags,
+				"node":    catalogService.Node,
+				"tags":    catalogService.ServiceTags,
 			}).Debug("new service tags")
 		}
 	}
