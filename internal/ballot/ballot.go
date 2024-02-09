@@ -183,7 +183,7 @@ func (b *Ballot) updateServiceTags() error {
 	return agent.ServiceRegister(registration)
 }
 
-// cleanup is called on promote, it cleans up tags on the instances of the service, useful if an other ballot stopped unexpectedly
+// cleanup is called on promote, it cleans up tags on the instances of the service, useful if another ballot stopped unexpectedly
 func (b *Ballot) cleanup() error {
 	service, catalogServices, err := b.getService()
 	if err != nil {
