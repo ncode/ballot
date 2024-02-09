@@ -15,6 +15,16 @@ import (
 	"golang.org/x/net/context"
 )
 
+type CommandExecutor interface {
+	Command(name string, arg ...string) *exec.Cmd
+}
+
+type commandExecutor struct{}
+
+func (e *commandExecutor) Command(name string, arg ...string) *exec.Cmd {
+	return exec.Command(name, arg...)
+}
+
 type ElectionPayload struct {
 	Address   string
 	Port      int
@@ -34,6 +44,7 @@ func New(name string, key string, serviceChecks []string, token string, execOnPr
 		TTL:           ttl,
 		LockDelay:     lockDelay,
 		client:        nil,
+		exec:          &commandExecutor{},
 	}
 
 	return b, err
@@ -55,6 +66,7 @@ type Ballot struct {
 	leader        atomic.Bool     `mapstructure:"-"`
 	client        *api.Client     `mapstructure:"-"`
 	ctx           context.Context `mapstructure:"-"`
+	exec          CommandExecutor `mapstructure:"-"`
 }
 
 // runCommand runs a command and returns the output.
@@ -66,7 +78,7 @@ func (b *Ballot) runCommand(command string, electionPayload *ElectionPayload) ([
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(args[0], args[1:]...)
+	cmd := b.exec.Command(args[0], args[1:]...)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("ADDRESS=%s", electionPayload.Address))
 	cmd.Env = append(cmd.Env, fmt.Sprintf("PORT=%d", electionPayload.Port))
 	cmd.Env = append(cmd.Env, fmt.Sprintf("SESSIONID=%s", electionPayload.SessionID))
