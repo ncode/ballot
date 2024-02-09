@@ -1,0 +1,15 @@
+consul:
+  token:
+election:
+  enabled:
+    - my-service
+  services:
+    my_service:
+      id: my-service2
+      key: service/my-service
+      token:
+      serviceChecks:
+        - service:election2
+      primaryTag: primary
+      execOnPromote: '/bin/echo I am da boss'
+      execOnDemote: '/bin/echo I am no longer da boss'

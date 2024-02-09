@@ -14,7 +14,7 @@ services:
   consul-agent-1:
     image: hashicorp/consul:latest
     container_name: consul-agent-1
-    command: "agent -dev -join=consul-server -bind=0.0.0.0"
+    command: "agent -dev -join=consul-server -bind=0.0.0.0 -config-dir=/etc/consul"
     volumes:
       - ./consul:/etc/consul:ro
     networks:
@@ -23,7 +23,7 @@ services:
   consul-agent-2:
     image: hashicorp/consul:latest
     container_name: consul-agent-2
-    command: "agent -dev -join=consul-server -bind=0.0.0.0"
+    command: "agent -dev -join=consul-server -bind=0.0.0.0 -config-dir=/etc/consul"
     volumes:
       - ./consul:/etc/consul:ro
     networks:
@@ -32,32 +32,38 @@ services:
   consul-agent-3:
     image: hashicorp/consul:latest
     container_name: consul-agent-3
-    command: "agent -dev -join=consul-server -bind=0.0.0.0"
+    command: "agent -dev -join=consul-server -bind=0.0.0.0 -config-dir=/etc/consul"
     volumes:
       - ./consul:/etc/consul:ro
     networks:
       - consul-network
 
-#  app-container-1:
-#    image: your-application-image
-#    container_name: app-container-1
-#    # Add your application-specific configuration here
-#    networks:
-#      - consul-network
-#
-#  app-container-2:
-#    image: your-application-image
-#    container_name: app-container-2
-#    # Add your application-specific configuration here
-#    networks:
-#      - consul-network
-#
-#  app-container-3:
-#    image: your-application-image
-#    container_name: app-container-3
-#    # Add your application-specific configuration here
-#    networks:
-#      - consul-network
+  ballot-1:
+    image: ncode/ballot:dev
+    container_name: ballot-1
+    command: "run --config /etc/ballot/ballot.yaml"
+    volumes:
+      - ./ballot-1:/etc/ballot:ro
+    networks:
+      - consul-network
+
+  ballot-2:
+    image: ncode/ballot:dev
+    container_name: ballot-2
+    command: "run --config /etc/ballot/ballot.yaml"
+    volumes:
+      - ./ballot-2:/etc/ballot:ro
+    networks:
+      - consul-network
+
+  ballot-3:
+    image: ncode/ballot:dev
+    container_name: ballot-3
+    command: "run --config /etc/ballot/ballot.yaml"
+    volumes:
+      - ./ballot-3:/etc/ballot:ro
+    networks:
+      - consul-network
 
 networks:
   consul-network:
