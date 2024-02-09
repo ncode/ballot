@@ -11,6 +11,7 @@ import (
 	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/api/watch"
 	log "github.com/sirupsen/logrus"
+	"github.com/spf13/viper"
 	"golang.org/x/exp/slices"
 	"golang.org/x/net/context"
 )
@@ -39,27 +40,31 @@ type ElectionPayload struct {
 }
 
 // New returns a new Ballot instance.
-func New(ctx context.Context, name string, key string, serviceChecks []string, token string, execOnPromote string, execOnDemote string, primaryTag string, ttl time.Duration, lockDelay time.Duration) (b *Ballot, err error) {
+func New(ctx context.Context, name string) (b *Ballot, err error) {
 	consulConfig := api.DefaultConfig()
-	consulConfig.Token = b.Token
+	consulConfig.Token = viper.GetString("consul.token")
+	consulConfig.Address = viper.GetString("consul.address")
 	client, err := api.NewClient(consulConfig)
 	if err != nil {
-		return nil, err
+		return b, err
 	}
 
-	b = &Ballot{
-		Name:          name,
-		Key:           key,
-		ServiceChecks: serviceChecks,
-		Token:         token,
-		ExecOnPromote: execOnPromote,
-		ExecOnDemote:  execOnDemote,
-		PrimaryTag:    primaryTag,
-		TTL:           ttl,
-		LockDelay:     lockDelay,
-		client:        client,
-		exec:          &commandExecutor{},
-		ctx:           ctx,
+	b = &Ballot{}
+	err = viper.UnmarshalKey(fmt.Sprintf("election.services.%s", name), b)
+	if err != nil {
+		return b, err
+	}
+	b.client = client
+	b.leader.Store(false)
+	b.exec = &commandExecutor{}
+	b.Token = consulConfig.Token
+
+	b.Name = name
+	if b.LockDelay == 0 {
+		b.LockDelay = 3 * time.Second
+	}
+	if b.TTL == 0 {
+		b.TTL = 10 * time.Second
 	}
 
 	return b, err
@@ -71,10 +76,11 @@ type Ballot struct {
 	ID            string          `mapstructure:"id"`
 	Key           string          `mapstructure:"key"`
 	ServiceChecks []string        `mapstructure:"serviceChecks"`
-	Token         string          `mapstructure:"token"`
+	Token         string          `mapstructure:"consul.token"`
 	ExecOnPromote string          `mapstructure:"execOnPromote"`
 	ExecOnDemote  string          `mapstructure:"execOnDemote"`
 	PrimaryTag    string          `mapstructure:"primaryTag"`
+	ConsulAddress string          `mapstructure:"consul.address"`
 	TTL           time.Duration   `mapstructure:"ttl"`
 	LockDelay     time.Duration   `mapstructure:"lockDelay"`
 	sessionID     atomic.Value    `mapstructure:"-"`
@@ -279,7 +285,6 @@ func (b *Ballot) election() (err error) {
 
 	err = b.session()
 	if err != nil {
-		fmt.Println("here Juliano")
 		if b.leader.Load() {
 			err := b.onDemote(electionPayload)
 			if err != nil {

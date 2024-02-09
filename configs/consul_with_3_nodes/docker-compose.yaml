@@ -15,6 +15,8 @@ services:
     image: hashicorp/consul:latest
     container_name: consul-agent-1
     command: "agent -dev -join=consul-server -bind=0.0.0.0 -config-dir=/etc/consul"
+    depends_on:
+      - consul-server
     volumes:
       - ./consul:/etc/consul:ro
     networks:
@@ -33,6 +35,8 @@ services:
     image: hashicorp/consul:latest
     container_name: consul-agent-3
     command: "agent -dev -join=consul-server -bind=0.0.0.0 -config-dir=/etc/consul"
+    depends_on:
+      - consul-server
     volumes:
       - ./consul:/etc/consul:ro
     networks:
@@ -42,6 +46,10 @@ services:
     image: ncode/ballot:dev
     container_name: ballot-1
     command: "run --config /etc/ballot/ballot.yaml"
+    depends_on:
+      - consul-agent-1
+      - consul-agent-2
+      - consul-agent-3
     volumes:
       - ./ballot-1:/etc/ballot:ro
     networks:
@@ -51,6 +59,10 @@ services:
     image: ncode/ballot:dev
     container_name: ballot-2
     command: "run --config /etc/ballot/ballot.yaml"
+    depends_on:
+      - consul-agent-1
+      - consul-agent-2
+      - consul-agent-3
     volumes:
       - ./ballot-2:/etc/ballot:ro
     networks:
@@ -60,6 +72,10 @@ services:
     image: ncode/ballot:dev
     container_name: ballot-3
     command: "run --config /etc/ballot/ballot.yaml"
+    depends_on:
+      - consul-agent-1
+      - consul-agent-2
+      - consul-agent-3
     volumes:
       - ./ballot-3:/etc/ballot:ro
     networks:

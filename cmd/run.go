@@ -16,9 +16,7 @@ limitations under the License.
 package cmd
 
 import (
-	"fmt"
 	"os"
-	"time"
 
 	"github.com/ncode/ballot/internal/ballot"
 	log "github.com/sirupsen/logrus"
@@ -31,19 +29,16 @@ var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run the ballot and starts all the defined elections",
 	Run: func(cmd *cobra.Command, args []string) {
+		ctx := cmd.Context()
 		for _, name := range viper.GetStringSlice("election.enabled") {
-			b := &ballot.Ballot{}
-			err := viper.UnmarshalKey(fmt.Sprintf("election.services.%s", name), b)
+			b, err := ballot.New(ctx, name)
 			if err != nil {
-				panic(err)
+				log.WithFields(log.Fields{
+					"caller": "run",
+					"step":   "New",
+				}).Error(err)
 			}
-			b.Name = name
-			if b.LockDelay == 0 {
-				b.LockDelay = 3 * time.Second
-			}
-			if b.TTL == 0 {
-				b.TTL = 10 * time.Second
-			}
+
 			err = b.Run()
 			if err != nil {
 				log.WithFields(log.Fields{

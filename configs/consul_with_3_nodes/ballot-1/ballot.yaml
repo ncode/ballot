@@ -1,5 +1,6 @@
 consul:
   token:
+  address: http://consul-agent-1:8500
 election:
   enabled:
     - my-service
