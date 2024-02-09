@@ -1,0 +1,65 @@
+version: '3'
+
+services:
+  consul-server:
+    image: hashicorp/consul:latest
+    container_name: consul-server
+    command: "agent -dev -bind=0.0.0.0"
+    ports:
+      - "8500:8500"
+      - "8600:8600/udp"
+    networks:
+      - consul-network
+
+  consul-agent-1:
+    image: hashicorp/consul:latest
+    container_name: consul-agent-1
+    command: "agent -dev -join=consul-server -bind=0.0.0.0"
+    volumes:
+      - ./consul:/etc/consul:ro
+    networks:
+      - consul-network
+
+  consul-agent-2:
+    image: hashicorp/consul:latest
+    container_name: consul-agent-2
+    command: "agent -dev -join=consul-server -bind=0.0.0.0"
+    volumes:
+      - ./consul:/etc/consul:ro
+    networks:
+      - consul-network
+
+  consul-agent-3:
+    image: hashicorp/consul:latest
+    container_name: consul-agent-3
+    command: "agent -dev -join=consul-server -bind=0.0.0.0"
+    volumes:
+      - ./consul:/etc/consul:ro
+    networks:
+      - consul-network
+
+#  app-container-1:
+#    image: your-application-image
+#    container_name: app-container-1
+#    # Add your application-specific configuration here
+#    networks:
+#      - consul-network
+#
+#  app-container-2:
+#    image: your-application-image
+#    container_name: app-container-2
+#    # Add your application-specific configuration here
+#    networks:
+#      - consul-network
+#
+#  app-container-3:
+#    image: your-application-image
+#    container_name: app-container-3
+#    # Add your application-specific configuration here
+#    networks:
+#      - consul-network
+
+networks:
+  consul-network:
+    driver: bridge
+
