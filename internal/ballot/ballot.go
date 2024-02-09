@@ -151,39 +151,36 @@ func (b *Ballot) updateServiceTags() error {
 	if err != nil {
 		return err
 	}
+
+	// Get a copy of the current service registration
 	registration := b.copyServiceToRegistration(service)
+
+	// Determine if the primary tag is already present
+	hasPrimaryTag := slices.Contains(registration.Tags, b.PrimaryTag)
+
+	// Update tags based on leadership status
+	if b.IsLeader() && !hasPrimaryTag {
+		// Add primary tag if not present and this node is the leader
+		registration.Tags = append(registration.Tags, b.PrimaryTag)
+	} else if !b.IsLeader() && hasPrimaryTag {
+		// Remove primary tag if present and this node is not the leader
+		index := slices.Index(registration.Tags, b.PrimaryTag)
+		registration.Tags = append(registration.Tags[:index], registration.Tags[index+1:]...)
+	} else {
+		// No changes needed
+		return nil
+	}
+
+	// Log the updated tags
 	log.WithFields(log.Fields{
 		"caller":  "updateServiceTags",
 		"service": b.ID,
 		"tags":    registration.Tags,
-	}).Debug("current service tags")
-	if b.IsLeader() && !slices.Contains(registration.Tags, b.PrimaryTag) {
-		registration.Tags = append(registration.Tags, b.PrimaryTag)
-		log.WithFields(log.Fields{
-			"caller":  "updateServiceTags",
-			"service": b.ID,
-			"tags":    registration.Tags,
-		}).Debug("new service tags")
-	} else {
-		p := slices.Index(registration.Tags, b.PrimaryTag)
-		if p == -1 {
-			return nil
-		}
-		registration.Tags = slices.Delete(registration.Tags, p, p+1)
-		log.WithFields(log.Fields{
-			"caller":  "updateServiceTags",
-			"service": b.ID,
-			"tags":    registration.Tags,
-		}).Debug("new service tags")
-	}
+	}).Debug("Updated service tags")
 
+	// Update the service registration with new tags
 	agent := b.client.Agent()
-	err = agent.ServiceRegister(registration)
-	if err != nil {
-		return err
-	}
-
-	return err
+	return agent.ServiceRegister(registration)
 }
 
 // cleanup is called on promote, it cleans up tags on the instances of the service, useful if an other ballot stopped unexpectedly
@@ -242,6 +239,7 @@ func (b *Ballot) onPromote() (err error) {
 func (b *Ballot) election() (err error) {
 	err = b.session()
 	if err != nil {
+		fmt.Println("here Juliano")
 		if b.leader.Load() {
 			err := b.onDemote()
 			if err != nil {
@@ -316,7 +314,6 @@ func (b *Ballot) electionLoop() {
 	}
 
 	electionTicker := time.NewTicker(5 * time.Second)
-	sessionTicker := time.NewTicker(3 * time.Second)
 	for {
 		select {
 		case <-electionTicker.C:
@@ -327,8 +324,6 @@ func (b *Ballot) electionLoop() {
 					"error":  err,
 				}).Error("failed to run election")
 			}
-		case <-sessionTicker.C:
-
 		case <-b.ctx.Done():
 			return
 		}
@@ -366,7 +361,6 @@ func (b *Ballot) session() (err error) {
 		return fmt.Errorf("failed to get health checks: %s", err)
 	}
 	if state == "critical" {
-		defer b.cleanup()
 		return fmt.Errorf("service is in critical state, so I won't even try to create a session")
 	}
 
@@ -390,14 +384,12 @@ func (b *Ballot) session() (err error) {
 	}).Trace("storing session ID")
 	b.sessionID.Store(sessionID)
 
-	go func() {
-		err := b.watch()
-		if err != nil {
-			log.WithFields(log.Fields{
-				"caller": "watch",
-			}).Error(err)
-		}
-	}()
+	err = b.watch()
+	if err != nil {
+		log.WithFields(log.Fields{
+			"caller": "watch",
+		}).Error(err)
+	}
 
 	go func() {
 		err := b.client.Session().RenewPeriodic(b.LockDelay.String(), sessionID, nil, b.ctx.Done())
@@ -453,80 +445,114 @@ func (b *Ballot) releaseSession() (err error) {
 	if err != nil {
 		return err
 	}
-	b.sessionID.Store(nil)
+	b.sessionID = atomic.Value{}
 	return err
 }
 
-// watch is responsible for watching the key and run a command when notified by changes
+// watch sets up a watch on a Consul KV pair and triggers actions on changes.
 func (b *Ballot) watch() error {
 	log.WithFields(log.Fields{
 		"caller": "watch",
-	}).Trace("watching key")
-	params := make(map[string]interface{})
-	params["type"] = "key"
-	params["key"] = b.Key
+	}).Trace("Setting up watch on key")
+
+	params := map[string]interface{}{
+		"type": "key",
+		"key":  b.Key,
+	}
 	if b.Token != "" {
 		params["token"] = b.Token
 	}
 
-	// Watch for changes
 	wp, err := watch.Parse(params)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to parse watch parameters: %s", err)
 	}
+
 	wp.Handler = func(idx uint64, data interface{}) {
-		electionPayload := &ElectionPayload{}
-		response, ok := data.(*api.KVPair)
-		if !ok {
+		if data == nil {
+			log.WithFields(log.Fields{
+				"caller": "watch",
+			}).Error("Received nil data on watch")
 			return
 		}
-		err = json.Unmarshal(response.Value, electionPayload)
-		if err != nil {
+
+		kvPair, ok := data.(*api.KVPair)
+		if !ok {
+			log.WithFields(log.Fields{
+				"caller": "watch",
+			}).Error("Unexpected data type on watch")
+			return
+		}
+
+		b.handleKVChange(kvPair)
+	}
+
+	go func() {
+		if err := wp.RunWithClientAndHclog(b.client, nil); err != nil {
 			log.WithFields(log.Fields{
 				"caller": "watch",
 				"error":  err,
-			}).Error("failed to unmarshal election payload")
+			}).Error("Watch failed")
 		}
-		if b.sessionID.Load() != nil && (electionPayload.SessionID == b.sessionID.Load().(string)) {
-			if b.ExecOnPromote != "" {
-				log.WithFields(log.Fields{
-					"caller": "watch",
-				}).Info("executing command on promote")
-				out, err := b.runCommand(b.ExecOnPromote, electionPayload)
-				if err != nil {
-					log.WithFields(log.Fields{
-						"caller": "watch",
-						"error":  err,
-					}).Error("failed to execute command on promote")
-				}
-				log.WithFields(log.Fields{
-					"caller": "watch",
-					"output": out,
-				}).Info("command executed on promote")
-			}
+	}()
+
+	return nil
+}
+
+// handleKVChange handles changes to the KV pair being watched.
+func (b *Ballot) handleKVChange(kvPair *api.KVPair) {
+	electionPayload := &ElectionPayload{}
+	if err := json.Unmarshal(kvPair.Value, electionPayload); err != nil {
+		log.WithFields(log.Fields{
+			"caller": "handleKVChange",
+			"error":  err,
+		}).Error("Failed to unmarshal election payload")
+		return
+	}
+
+	if b.sessionID.Load() != nil && electionPayload.SessionID == b.sessionID.Load().(string) {
+		b.executePromoteCommand(electionPayload)
+	} else {
+		b.executeDemoteCommand(electionPayload)
+	}
+}
+
+// executePromoteCommand executes the command for promotion.
+func (b *Ballot) executePromoteCommand(electionPayload *ElectionPayload) {
+	if b.ExecOnPromote != "" {
+		log.WithFields(log.Fields{
+			"caller": "executePromoteCommand",
+		}).Info("Executing promote command")
+		if out, err := b.runCommand(b.ExecOnPromote, electionPayload); err != nil {
+			log.WithFields(log.Fields{
+				"caller": "executePromoteCommand",
+				"error":  err,
+			}).Error("Failed to execute promote command")
 		} else {
-			if b.ExecOnDemote != "" {
-				log.WithFields(log.Fields{
-					"caller": "watch",
-				}).Info("executing command on demote")
-				out, err := b.runCommand(b.ExecOnDemote, electionPayload)
-				if err != nil {
-					log.WithFields(log.Fields{
-						"caller": "watch",
-						"error":  err,
-					}).Error("failed to execute command on demote")
-				}
-				log.WithFields(log.Fields{
-					"caller": "watch",
-					"output": out,
-				}).Info("command executed on demote")
-			}
+			log.WithFields(log.Fields{
+				"caller": "executePromoteCommand",
+				"output": string(out),
+			}).Info("Promote command executed successfully")
 		}
 	}
+}
 
-	if err := wp.RunWithClientAndHclog(b.client, nil); err != nil {
-		return err
+// executeDemoteCommand executes the command for demotion.
+func (b *Ballot) executeDemoteCommand(electionPayload *ElectionPayload) {
+	if b.ExecOnDemote != "" {
+		log.WithFields(log.Fields{
+			"caller": "executeDemoteCommand",
+		}).Info("Executing demote command")
+		if out, err := b.runCommand(b.ExecOnDemote, electionPayload); err != nil {
+			log.WithFields(log.Fields{
+				"caller": "executeDemoteCommand",
+				"error":  err,
+			}).Error("Failed to execute demote command")
+		} else {
+			log.WithFields(log.Fields{
+				"caller": "executeDemoteCommand",
+				"output": string(out),
+			}).Info("Demote command executed successfully")
+		}
 	}
-
-	return err
 }
