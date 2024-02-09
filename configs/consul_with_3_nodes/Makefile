@@ -6,7 +6,7 @@ build:
 	GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" ../../
 
 docker-build:
-	docker build -t ncode/bedel:dev .
+	docker build -t ncode/ballot:dev .
 
 up:
 	docker compose up
