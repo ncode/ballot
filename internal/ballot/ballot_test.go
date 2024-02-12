@@ -11,9 +11,17 @@ import (
 )
 
 func TestNew(t *testing.T) {
-	b, err := New(context.Background(), "test")
-	assert.NoError(t, err)
-	assert.NotNil(t, b)
+	t.Run("successful new", func(t *testing.T) {
+		b, err := New(context.Background(), "test")
+		assert.NoError(t, err)
+		assert.NotNil(t, b)
+	})
+
+	t.Run("failure due to nil context", func(t *testing.T) {
+		b, err := New(nil, "test")
+		assert.Error(t, err)
+		assert.Nil(t, b)
+	})
 }
 
 func TestCopyServiceToRegistration(t *testing.T) {
