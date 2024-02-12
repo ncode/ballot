@@ -3,11 +3,11 @@ package ballot
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/google/shlex"
 	"os/exec"
 	"sync/atomic"
 	"time"
 
-	"github.com/google/shlex"
 	"github.com/hashicorp/consul/api"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
@@ -24,12 +24,6 @@ type ConsulClient interface {
 	Catalog() *api.Catalog
 	KV() *api.KV
 	Session() *api.Session
-}
-
-type commandExecutor struct{}
-
-func (e *commandExecutor) Command(name string, arg ...string) *exec.Cmd {
-	return exec.Command(name, arg...)
 }
 
 type ElectionPayload struct {
@@ -58,7 +52,6 @@ func New(ctx context.Context, name string) (b *Ballot, err error) {
 	}
 	b.client = client
 	b.leader.Store(false)
-	b.exec = &commandExecutor{}
 	b.Token = consulConfig.Token
 	b.ctx = ctx
 
@@ -91,22 +84,6 @@ type Ballot struct {
 	client        ConsulClient    `mapstructure:"-"`
 	ctx           context.Context `mapstructure:"-"`
 	exec          CommandExecutor `mapstructure:"-"`
-}
-
-// runCommand runs a command and returns the output.
-func (b *Ballot) runCommand(command string, electionPayload *ElectionPayload) ([]byte, error) {
-	log.WithFields(log.Fields{
-		"caller": "runCommand",
-	}).Info("Running command: ", command)
-	args, err := shlex.Split(command)
-	if err != nil {
-		return nil, err
-	}
-	cmd := b.exec.Command(args[0], args[1:]...)
-	cmd.Env = append(cmd.Env, fmt.Sprintf("ADDRESS=%s", electionPayload.Address))
-	cmd.Env = append(cmd.Env, fmt.Sprintf("PORT=%d", electionPayload.Port))
-	cmd.Env = append(cmd.Env, fmt.Sprintf("SESSIONID=%s", electionPayload.SessionID))
-	return cmd.Output()
 }
 
 // Copy *api.AgentService to *api.AgentServiceRegistration
@@ -166,6 +143,22 @@ func (b *Ballot) getService() (service *api.AgentService, catalogServices []*api
 	return service, catalogServices, err
 }
 
+// runCommand runs a command and returns the output.
+func (b *Ballot) runCommand(command string, electionPayload *ElectionPayload) ([]byte, error) {
+	log.WithFields(log.Fields{
+		"caller": "runCommand",
+	}).Info("Running command: ", command)
+	args, err := shlex.Split(command)
+	if err != nil {
+		return nil, err
+	}
+	cmd := b.exec.Command(args[0], args[1:]...)
+	cmd.Env = append(cmd.Env, fmt.Sprintf("ADDRESS=%s", electionPayload.Address))
+	cmd.Env = append(cmd.Env, fmt.Sprintf("PORT=%d", electionPayload.Port))
+	cmd.Env = append(cmd.Env, fmt.Sprintf("SESSIONID=%s", electionPayload.SessionID))
+	return cmd.Output()
+}
+
 // updateServiceTags updates the service tags.
 func (b *Ballot) updateServiceTags() error {
 	service, _, err := b.getService()
@@ -204,80 +197,55 @@ func (b *Ballot) updateServiceTags() error {
 	return agent.ServiceRegister(registration)
 }
 
-// cleanup is called on promote, it cleans up tags on the instances of the service, useful if another ballot stopped unexpectedly
-func (b *Ballot) cleanup() error {
-	service, catalogServices, err := b.getService()
-	if err != nil {
-		return err
+// cleanup is called by the winning service to ensure that the primary tag is removed from all other instances of the service.
+func (b *Ballot) cleanup(payload *ElectionPayload) error {
+	if !b.IsLeader() {
+		// If this instance is not the leader, do not perform cleanup
+		return nil
 	}
-	for _, catalogService := range catalogServices {
-		if catalogService.Address != service.Address {
-			p := slices.Index(catalogService.ServiceTags, b.PrimaryTag)
-			if p == -1 {
-				return nil
-			}
-			log.WithFields(log.Fields{
-				"caller":  "cleanupCatalogServiceTags",
-				"service": b.ID,
-				"node":    catalogService.Node,
-				"tags":    catalogService.ServiceTags,
-			}).Debug("current service tags")
-			catalogService.ServiceTags = slices.Delete(catalogService.ServiceTags, p, p+1)
-			catalog := b.client.Catalog()
-			reg := b.copyCatalogServiceToRegistration(catalogService)
-			_, err := catalog.Register(reg, &api.WriteOptions{})
+
+	catalogServices, _, err := b.client.Catalog().Service(b.Name, "", nil)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve services from the catalog: %s", err)
+	}
+
+	for _, service := range catalogServices {
+		// Skip cleaning up the leader's own service
+		if service.ServiceAddress == payload.Address && service.ServicePort == payload.Port {
+			continue
+		}
+
+		// Check if the primary tag is present
+		primaryTagIndex := slices.Index(service.ServiceTags, b.PrimaryTag)
+		if primaryTagIndex != -1 {
+			// Remove the primary tag
+			updatedTags := append(service.ServiceTags[:primaryTagIndex], service.ServiceTags[primaryTagIndex+1:]...)
+
+			// Prepare the catalog registration for update
+			catalogRegistration := b.copyCatalogServiceToRegistration(service)
+			catalogRegistration.Service.Tags = updatedTags
+
+			// Update the catalog service
+			_, err := b.client.Catalog().Register(catalogRegistration, nil)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to update service tags in the catalog: %s", err)
 			}
+
 			log.WithFields(log.Fields{
-				"caller":  "cleanupCatalogServiceTags",
-				"service": b.ID,
-				"node":    catalogService.Node,
-				"tags":    catalogService.ServiceTags,
-			}).Debug("new service tags")
+				"caller":  "cleanup",
+				"service": service.ServiceID,
+				"node":    service.Node,
+				"tags":    updatedTags,
+			}).Info("Cleaned up primary tag from service")
 		}
 	}
 	return nil
 }
 
-// onPromote is called when the node is promoted to leader.
-func (b *Ballot) onPromote(electionPayload *ElectionPayload) (err error) {
-	b.leader.Store(true)
-	err = b.updateServiceTags()
-	if err != nil {
-		b.releaseSession()
-		return fmt.Errorf("failed to update service tags: %s", err)
-	}
-	err = b.cleanup()
-	if err != nil {
-		b.releaseSession()
-		return fmt.Errorf("failed to cleanup old service tags: %s", err)
-	}
-	if b.ExecOnPromote != "" {
-		log.WithFields(log.Fields{
-			"caller":  "executePromoteCommand",
-			"command": b.ExecOnPromote,
-		}).Info("Executing promote command")
-		if out, err := b.runCommand(b.ExecOnPromote, electionPayload); err != nil {
-			log.WithFields(log.Fields{
-				"caller": "executePromoteCommand",
-				"error":  err,
-			}).Error("Failed to execute promote command")
-		} else {
-			log.WithFields(log.Fields{
-				"caller": "executePromoteCommand",
-				"output": string(out),
-			}).Info("Promote command executed successfully")
-		}
-	}
-	return err
-}
-
 func (b *Ballot) election() (err error) {
-	// Retrieve current session data and service details
-	currentSessionData, err := b.getSessionData()
+	err = b.handleServiceCriticalState()
 	if err != nil {
-		return fmt.Errorf("failed to get session data: %s", err)
+		return err
 	}
 
 	service, _, err := b.getService()
@@ -285,20 +253,17 @@ func (b *Ballot) election() (err error) {
 		return fmt.Errorf("failed to get service: %s", err)
 	}
 
+	// Session validation and renewal
+	err = b.session()
+	if err != nil {
+		return fmt.Errorf("failed to create session: %s", err)
+	}
+
 	// Prepare the election payload
 	electionPayload := &ElectionPayload{
 		Address:   service.Address,
 		Port:      service.Port,
 		SessionID: b.sessionID.Load().(string),
-	}
-
-	// Session validation and renewal
-	err = b.session()
-	if err != nil {
-		if b.leader.Load() {
-			_ = b.onDemote(currentSessionData) // Handle demotion if currently a leader
-		}
-		return fmt.Errorf("failed to create session: %s", err)
 	}
 
 	// Attempt to acquire leadership
@@ -309,8 +274,13 @@ func (b *Ballot) election() (err error) {
 		}
 	}
 
+	err = b.cleanup(electionPayload)
+	if err != nil {
+		return fmt.Errorf("failed to cleanup: %s", err)
+	}
+
 	// Check leadership status and respond accordingly
-	return b.verifyAndUpdateLeadershipStatus(electionPayload)
+	return b.verifyAndUpdateLeadershipStatus()
 }
 
 func (b *Ballot) attemptLeadershipAcquisition(electionPayload *ElectionPayload) (bool, *api.WriteMeta, error) {
@@ -328,7 +298,7 @@ func (b *Ballot) attemptLeadershipAcquisition(electionPayload *ElectionPayload) 
 	return b.client.KV().Acquire(content, nil)
 }
 
-func (b *Ballot) verifyAndUpdateLeadershipStatus(electionPayload *ElectionPayload) error {
+func (b *Ballot) verifyAndUpdateLeadershipStatus() error {
 	currentSessionData, err := b.getSessionData()
 	if err != nil {
 		return fmt.Errorf("failed to get session data: %s", err)
@@ -341,29 +311,12 @@ func (b *Ballot) verifyAndUpdateLeadershipStatus(electionPayload *ElectionPayloa
 		return nil
 	}
 
-	if b.sessionID.Load() != nil && currentSessionData.SessionID == b.sessionID.Load().(string) {
-		if !b.IsLeader() {
-			return b.onPromote(electionPayload)
-		}
-	} else {
-		if b.IsLeader() {
-			return b.onDemote(currentSessionData)
-		}
-	}
-	return nil
+	isCurrentLeader := b.sessionID.Load() != nil && currentSessionData.SessionID == b.sessionID.Load().(string)
+	return b.updateLeadershipStatus(isCurrentLeader)
 }
 
 // Run is the main loop for the leader election.
 func (b *Ballot) Run() (err error) {
-	err = b.session()
-	if err != nil {
-		log.WithFields(log.Fields{
-			"caller": "Run",
-			"error":  err,
-		}).Error("failed acquire session")
-		return err
-	}
-
 	electionTicker := time.NewTicker(5 * time.Second)
 	for {
 		select {
@@ -381,31 +334,39 @@ func (b *Ballot) Run() (err error) {
 	}
 }
 
-// onDemote is called when the node is demoted from leader.
-func (b *Ballot) onDemote(electionPayload *ElectionPayload) (err error) {
-	b.leader.Store(false)
-	err = b.updateServiceTags()
+// updateLeadershipStatus is called when there is a change in leadership status.
+func (b *Ballot) updateLeadershipStatus(isLeader bool) error {
+	// Update leader status
+	b.leader.Store(isLeader)
+
+	// Update service tags based on leadership status
+	err := b.updateServiceTags()
 	if err != nil {
 		return err
 	}
-	if b.ExecOnDemote != "" && electionPayload != nil {
-		log.WithFields(log.Fields{
-			"caller":  "executeDemoteCommand",
-			"command": b.ExecOnDemote,
-		}).Info("Executing demote command")
-		if out, err := b.runCommand(b.ExecOnDemote, electionPayload); err != nil {
-			log.WithFields(log.Fields{
-				"caller": "executeDemoteCommand",
-				"error":  err,
-			}).Error("Failed to execute demote command")
-		} else {
-			log.WithFields(log.Fields{
-				"caller": "executeDemoteCommand",
-				"output": string(out),
-			}).Info("Demote command executed successfully")
-		}
+
+	return nil
+}
+
+// handleServiceCriticalState is called when the service is in a critical state.
+func (b *Ballot) handleServiceCriticalState() error {
+	state, _, err := b.client.Agent().AgentHealthServiceByName(b.Name)
+	if err != nil {
+		return fmt.Errorf("failed to get health checks: %s", err)
 	}
-	return err
+
+	if state == "critical" {
+		err := b.releaseSession()
+		if err != nil {
+			return fmt.Errorf("failed to release session for service in critical state: %s", err)
+		}
+		err = b.updateLeadershipStatus(false)
+		if err != nil {
+			return fmt.Errorf("failed to update leadership status for service in critical state: %s", err)
+		}
+		return fmt.Errorf("service is in critical state, so I'm skipping the election")
+	}
+	return nil
 }
 
 // session is responsible for creating and renewing the session.
@@ -426,13 +387,6 @@ func (b *Ballot) session() (err error) {
 			}).Trace("returning cached session")
 			return nil
 		}
-	}
-	state, _, err := b.client.Agent().AgentHealthServiceByName(b.Name)
-	if err != nil {
-		return fmt.Errorf("failed to get health checks: %s", err)
-	}
-	if state == "critical" {
-		return fmt.Errorf("service is in critical state, so I won't even try to create a session")
 	}
 
 	log.WithFields(log.Fields{
