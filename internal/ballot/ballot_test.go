@@ -17,46 +17,66 @@ func TestNew(t *testing.T) {
 }
 
 func TestCopyServiceToRegistration(t *testing.T) {
-	b, _ := New(context.Background(), "test")
-	service := &api.AgentService{
-		ID:      "id",
-		Service: "service",
-		Port:    8080,
-		Address: "127.0.0.1",
-	}
-	reg := b.copyServiceToRegistration(service)
-	assert.Equal(t, service.ID, reg.ID)
-	assert.Equal(t, service.Service, reg.Name)
-	assert.Equal(t, service.Port, reg.Port)
-	assert.Equal(t, service.Address, reg.Address)
+	b := &Ballot{}
+
+	t.Run("successful copy", func(t *testing.T) {
+		service := &api.AgentService{
+			ID:      "testID",
+			Service: "testService",
+			Tags:    []string{"tag1", "tag2"},
+			Port:    8080,
+			Address: "127.0.0.1",
+		}
+
+		registration := b.copyServiceToRegistration(service)
+
+		assert.Equal(t, service.ID, registration.ID)
+		assert.Equal(t, service.Service, registration.Name)
+		assert.Equal(t, service.Tags, registration.Tags)
+		assert.Equal(t, service.Port, registration.Port)
+		assert.Equal(t, service.Address, registration.Address)
+	})
+
+	t.Run("failure due to nil service", func(t *testing.T) {
+		assert.Panics(t, func() { b.copyServiceToRegistration(nil) })
+	})
 }
 
 func TestCopyCatalogServiceToRegistration(t *testing.T) {
-	b, _ := New(context.Background(), "test")
-	service := &api.CatalogService{
-		ID:                       "id",
-		Node:                     "node",
-		ServiceAddress:           "127.0.0.1",
-		ServiceID:                "serviceId",
-		ServiceName:              "serviceName",
-		ServicePort:              8080,
-		ServiceTags:              []string{"tag1", "tag2"},
-		ServiceMeta:              map[string]string{"key": "value"},
-		ServiceWeights:           api.Weights{Passing: 1, Warning: 1},
-		ServiceEnableTagOverride: true,
-	}
-	reg := b.copyCatalogServiceToRegistration(service)
-	assert.Equal(t, service.ID, reg.ID)
-	assert.Equal(t, service.Node, reg.Node)
-	assert.Equal(t, service.ServiceAddress, reg.Address)
-	assert.Equal(t, service.ServiceID, reg.Service.ID)
-	assert.Equal(t, service.ServiceName, reg.Service.Service)
-	assert.Equal(t, service.ServicePort, reg.Service.Port)
-	assert.Equal(t, service.ServiceTags, reg.Service.Tags)
-	assert.Equal(t, service.ServiceMeta, reg.Service.Meta)
-	assert.Equal(t, service.ServiceWeights.Passing, reg.Service.Weights.Passing)
-	assert.Equal(t, service.ServiceWeights.Warning, reg.Service.Weights.Warning)
-	assert.Equal(t, service.ServiceEnableTagOverride, reg.Service.EnableTagOverride)
+	b := &Ballot{}
+
+	t.Run("successful copy", func(t *testing.T) {
+		service := &api.CatalogService{
+			ID:                       "id",
+			Node:                     "node",
+			ServiceAddress:           "127.0.0.1",
+			ServiceID:                "serviceId",
+			ServiceName:              "serviceName",
+			ServicePort:              8080,
+			ServiceTags:              []string{"tag1", "tag2"},
+			ServiceMeta:              map[string]string{"key": "value"},
+			ServiceWeights:           api.Weights{Passing: 1, Warning: 1},
+			ServiceEnableTagOverride: true,
+		}
+
+		registration := b.copyCatalogServiceToRegistration(service)
+		assert.Equal(t, service.ID, registration.ID)
+		assert.Equal(t, service.Node, registration.Node)
+		assert.Equal(t, service.ServiceAddress, registration.Address)
+		assert.Equal(t, service.ServiceID, registration.Service.ID)
+		assert.Equal(t, service.ServiceName, registration.Service.Service)
+		assert.Equal(t, service.ServicePort, registration.Service.Port)
+		assert.Equal(t, service.ServiceTags, registration.Service.Tags)
+		assert.Equal(t, service.ServiceMeta, registration.Service.Meta)
+		assert.Equal(t, service.ServiceWeights.Passing, registration.Service.Weights.Passing)
+		assert.Equal(t, service.ServiceWeights.Warning, registration.Service.Weights.Warning)
+		assert.Equal(t, service.ServiceEnableTagOverride, registration.Service.EnableTagOverride)
+
+	})
+
+	t.Run("failure due to nil service", func(t *testing.T) {
+		assert.Panics(t, func() { b.copyCatalogServiceToRegistration(nil) })
+	})
 }
 
 // MockCommandExecutor is a mock implementation of the CommandExecutor interface
@@ -99,4 +119,54 @@ func TestRunCommand(t *testing.T) {
 
 	// Assert that the method did not return an error
 	assert.NoError(t, err)
+}
+
+func TestMakeServiceCheck(t *testing.T) {
+	b := &Ballot{}
+
+	t.Run("successful creation of service checks", func(t *testing.T) {
+		sc := []string{"check1", "check2", "check3"}
+
+		serviceChecks := b.makeServiceCheck(sc)
+
+		assert.Equal(t, len(sc), len(serviceChecks))
+		for i, check := range serviceChecks {
+			assert.Equal(t, sc[i], check.ID)
+		}
+	})
+
+	t.Run("handling of empty slice", func(t *testing.T) {
+		sc := []string{}
+
+		serviceChecks := b.makeServiceCheck(sc)
+
+		assert.Equal(t, 0, len(serviceChecks))
+	})
+}
+
+func TestIsLeader(t *testing.T) {
+	t.Run("returns true when the ballot is the leader", func(t *testing.T) {
+		b := &Ballot{}
+		b.leader.Store(true)
+		b.sessionID.Store("session")
+		assert.True(t, b.IsLeader())
+	})
+
+	t.Run("returns false when the ballot is not the leader", func(t *testing.T) {
+		b := &Ballot{}
+
+		assert.False(t, b.IsLeader())
+	})
+
+	t.Run("returns false when the ballot hasn't stored a state yet", func(t *testing.T) {
+		b := &Ballot{}
+
+		assert.False(t, b.IsLeader())
+	})
+
+	t.Run("returns false when the ballot hasn't stored a session yet", func(t *testing.T) {
+		b := &Ballot{}
+
+		assert.False(t, b.IsLeader())
+	})
 }

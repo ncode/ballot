@@ -101,6 +101,7 @@ func (b *Ballot) copyServiceToRegistration(service *api.AgentService) *api.Agent
 	}
 }
 
+// Copy *api.CatalogService to *api.CatalogRegistration
 func (b *Ballot) copyCatalogServiceToRegistration(service *api.CatalogService) *api.CatalogRegistration {
 	return &api.CatalogRegistration{
 		ID:              service.ID,
@@ -243,6 +244,7 @@ func (b *Ballot) cleanup(payload *ElectionPayload) error {
 	return nil
 }
 
+// election is the main logic for the leader election.
 func (b *Ballot) election() (err error) {
 	err = b.handleServiceCriticalState()
 	if err != nil {
@@ -284,6 +286,7 @@ func (b *Ballot) election() (err error) {
 	return b.verifyAndUpdateLeadershipStatus()
 }
 
+// attemptLeadershipAcquisition attempts to acquire leadership.
 func (b *Ballot) attemptLeadershipAcquisition(electionPayload *ElectionPayload) (bool, *api.WriteMeta, error) {
 	payload, err := json.Marshal(electionPayload)
 	if err != nil {
@@ -299,6 +302,7 @@ func (b *Ballot) attemptLeadershipAcquisition(electionPayload *ElectionPayload) 
 	return b.client.KV().Acquire(content, nil)
 }
 
+// verifyAndUpdateLeadershipStatus checks the current session data and updates the leadership status.
 func (b *Ballot) verifyAndUpdateLeadershipStatus() error {
 	currentSessionData, err := b.getSessionData()
 	if err != nil {
