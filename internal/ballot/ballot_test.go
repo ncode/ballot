@@ -1,9 +1,9 @@
 package ballot
 
 import (
+	"context"
 	"os/exec"
 	"testing"
-	"time"
 
 	"github.com/hashicorp/consul/api"
 	"github.com/stretchr/testify/assert"
@@ -11,13 +11,13 @@ import (
 )
 
 func TestNew(t *testing.T) {
-	b, err := New("test", "key", []string{"check1", "check2"}, "token", "promote", "demote", "primary", time.Second, time.Second)
+	b, err := New(context.Background(), "test")
 	assert.NoError(t, err)
 	assert.NotNil(t, b)
 }
 
 func TestCopyServiceToRegistration(t *testing.T) {
-	b, _ := New("test", "key", []string{"check1", "check2"}, "token", "promote", "demote", "primary", time.Second, time.Second)
+	b, _ := New(context.Background(), "test")
 	service := &api.AgentService{
 		ID:      "id",
 		Service: "service",
@@ -32,7 +32,7 @@ func TestCopyServiceToRegistration(t *testing.T) {
 }
 
 func TestCopyCatalogServiceToRegistration(t *testing.T) {
-	b, _ := New("test", "key", []string{"check1", "check2"}, "token", "promote", "demote", "primary", time.Second, time.Second)
+	b, _ := New(context.Background(), "test")
 	service := &api.CatalogService{
 		ID:                       "id",
 		Node:                     "node",

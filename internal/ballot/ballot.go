@@ -3,10 +3,11 @@ package ballot
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/google/shlex"
 	"os/exec"
 	"sync/atomic"
 	"time"
+
+	"github.com/google/shlex"
 
 	"github.com/hashicorp/consul/api"
 	log "github.com/sirupsen/logrus"
