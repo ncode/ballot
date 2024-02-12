@@ -55,7 +55,7 @@ $SESSIONID # Current SessionID of the elected master
 ### TODO:
 
 - Write tests
+- Add more examples
+- Re-enable the hooks on state change
 - Allow to pre-define the preferred leader
-- When a node dies, we cleanup all services from extra nodes
-- Figure out how to deal with node maintenance
 - Update the docks with the lock delays and timeouts
