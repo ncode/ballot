@@ -41,6 +41,9 @@ type ElectionPayload struct {
 
 // New returns a new Ballot instance.
 func New(ctx context.Context, name string) (b *Ballot, err error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("context is required")
+	}
 	consulConfig := api.DefaultConfig()
 	consulConfig.Token = viper.GetString("consul.token")
 	consulConfig.Address = viper.GetString("consul.address")
@@ -58,6 +61,7 @@ func New(ctx context.Context, name string) (b *Ballot, err error) {
 	b.leader.Store(false)
 	b.exec = &commandExecutor{}
 	b.Token = consulConfig.Token
+	b.ctx = ctx
 
 	b.Name = name
 	if b.LockDelay == 0 {
@@ -270,71 +274,84 @@ func (b *Ballot) onPromote(electionPayload *ElectionPayload) (err error) {
 	return err
 }
 
-// election is responsible for the leader election.
 func (b *Ballot) election() (err error) {
+	// Retrieve current session data and service details
+	currentSessionData, err := b.getSessionData()
+	if err != nil {
+		return fmt.Errorf("failed to get session data: %s", err)
+	}
+
 	service, _, err := b.getService()
 	if err != nil {
 		return fmt.Errorf("failed to get service: %s", err)
 	}
 
+	// Prepare the election payload
 	electionPayload := &ElectionPayload{
 		Address:   service.Address,
 		Port:      service.Port,
 		SessionID: b.sessionID.Load().(string),
 	}
 
+	// Session validation and renewal
 	err = b.session()
 	if err != nil {
 		if b.leader.Load() {
-			err := b.onDemote(electionPayload)
-			if err != nil {
-				return fmt.Errorf("failed to validate session as leader, forcing demotion: %s", err.Error())
-			}
+			_ = b.onDemote(currentSessionData) // Handle demotion if currently a leader
 		}
 		return fmt.Errorf("failed to create session: %s", err)
 	}
 
-	if !b.leader.Load() {
-		if b.sessionID.Load() != nil {
-			payload, err := json.Marshal(electionPayload)
-			if err != nil {
-				return fmt.Errorf("failed to marshal election payload: %s", err)
-			}
-
-			content := &api.KVPair{
-				Key:     b.Key,
-				Session: b.sessionID.Load().(string),
-				Value:   payload,
-			}
-
-			_, _, err = b.client.KV().Acquire(content, nil)
-			if err != nil {
-				return fmt.Errorf("failed to acquire lock: %s", err)
-			}
+	// Attempt to acquire leadership
+	if !b.leader.Load() && b.sessionID.Load() != nil {
+		_, _, err = b.attemptLeadershipAcquisition(electionPayload)
+		if err != nil {
+			return fmt.Errorf("failed to acquire lock: %s", err)
 		}
 	}
 
-	session, err := b.getSessionKey()
-	if err == nil {
-		if b.sessionID.Load() != nil && session == b.sessionID.Load().(string) {
-			if !b.IsLeader() {
-				err = b.onPromote(electionPayload)
-				if err != nil {
-					return fmt.Errorf("failures during promotion: %s", err.Error())
-				}
-			}
-		} else {
-			if b.IsLeader() {
-				err = b.onDemote(electionPayload)
-				if err != nil {
-					return fmt.Errorf("failures during demotion: %s", err.Error())
-				}
-			}
-		}
-		return err
+	// Check leadership status and respond accordingly
+	return b.verifyAndUpdateLeadershipStatus(electionPayload)
+}
+
+func (b *Ballot) attemptLeadershipAcquisition(electionPayload *ElectionPayload) (bool, *api.WriteMeta, error) {
+	payload, err := json.Marshal(electionPayload)
+	if err != nil {
+		return false, nil, fmt.Errorf("failed to marshal election payload: %s", err)
 	}
 
-	return fmt.Errorf("unable to retrieve kv data: %s", err.Error())
+	content := &api.KVPair{
+		Key:     b.Key,
+		Session: b.sessionID.Load().(string),
+		Value:   payload,
+	}
+
+	return b.client.KV().Acquire(content, nil)
+}
+
+func (b *Ballot) verifyAndUpdateLeadershipStatus(electionPayload *ElectionPayload) error {
+	currentSessionData, err := b.getSessionData()
+	if err != nil {
+		return fmt.Errorf("failed to get session data: %s", err)
+	}
+
+	if currentSessionData == nil {
+		log.WithFields(log.Fields{
+			"caller": "verifyAndUpdateLeadershipStatus",
+		}).Debug("current session data is nil, skipping election check")
+		return nil
+	}
+
+	if b.sessionID.Load() != nil && currentSessionData.SessionID == b.sessionID.Load().(string) {
+		if !b.IsLeader() {
+			return b.onPromote(electionPayload)
+		}
+	} else {
+		if b.IsLeader() {
+			return b.onDemote(currentSessionData)
+		}
+	}
+	return nil
 }
 
 // Run is the main loop for the leader election.
@@ -372,7 +389,7 @@ func (b *Ballot) onDemote(electionPayload *ElectionPayload) (err error) {
 	if err != nil {
 		return err
 	}
-	if b.ExecOnDemote != "" {
+	if b.ExecOnDemote != "" && electionPayload != nil {
 		log.WithFields(log.Fields{
 			"caller":  "executeDemoteCommand",
 			"command": b.ExecOnDemote,
@@ -394,6 +411,9 @@ func (b *Ballot) onDemote(electionPayload *ElectionPayload) (err error) {
 
 // session is responsible for creating and renewing the session.
 func (b *Ballot) session() (err error) {
+	if b.client == nil {
+		return fmt.Errorf("consul client is required")
+	}
 	if b.sessionID.Load() != nil {
 		currentSessionID := b.sessionID.Load().(string)
 		sessionInfo, _, err := b.client.Session().Info(currentSessionID, nil)
@@ -476,15 +496,20 @@ func (b *Ballot) IsLeader() bool {
 	return b.leader.Load() && b.sessionID.Load() != nil
 }
 
-func (b *Ballot) getSessionKey() (session string, err error) {
+func (b *Ballot) getSessionData() (data *ElectionPayload, err error) {
 	sessionKey, _, err := b.client.KV().Get(b.Key, nil)
 	if err != nil {
-		return session, err
+		return data, err
 	}
 	if sessionKey == nil {
-		return session, err
+		return data, err
 	}
-	return sessionKey.Session, nil
+	err = json.Unmarshal(sessionKey.Value, &data)
+	if err != nil {
+		return data, err
+	}
+
+	return data, nil
 }
 
 // releaseSession releases the session.

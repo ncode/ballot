@@ -16,6 +16,7 @@ limitations under the License.
 package cmd
 
 import (
+	"golang.org/x/net/context"
 	"os"
 
 	"github.com/ncode/ballot/internal/ballot"
@@ -29,7 +30,7 @@ var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run the ballot and starts all the defined elections",
 	Run: func(cmd *cobra.Command, args []string) {
-		ctx := cmd.Context()
+		ctx := context.Background()
 		for _, name := range viper.GetStringSlice("election.enabled") {
 			b, err := ballot.New(ctx, name)
 			if err != nil {
