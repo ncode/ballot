@@ -1,0 +1,15 @@
+{
+  "ID": "my-service3",
+  "Name": "my-service",
+  "Tags": ["v1"],
+  "Address": "127.0.0.1",
+  "Port": 8000,
+  "Check": {
+    "CheckID": "service:election3",
+    "DeregisterCriticalServiceAfter": "90m",
+    "Args": ["/tmp/lalala3"],
+    "Interval": "10s",
+    "Timeout": "5s"
+  },
+  "EnableTagOverride": true,
+}
