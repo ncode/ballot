@@ -9,7 +9,6 @@ import (
 
 	"github.com/google/shlex"
 	"github.com/hashicorp/consul/api"
-	"github.com/hashicorp/consul/api/watch"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 	"golang.org/x/exp/slices"
@@ -456,13 +455,6 @@ func (b *Ballot) session() (err error) {
 	}).Trace("storing session ID")
 	b.sessionID.Store(sessionID)
 
-	// err = b.watch()
-	// if err != nil {
-	// 	log.WithFields(log.Fields{
-	// 		"caller": "watch",
-	// 	}).Error(err)
-	// }
-
 	go func() {
 		err := b.client.Session().RenewPeriodic(b.LockDelay.String(), sessionID, nil, b.ctx.Done())
 		if err != nil {
@@ -524,112 +516,4 @@ func (b *Ballot) releaseSession() (err error) {
 	}
 	b.sessionID = atomic.Value{}
 	return err
-}
-
-// watch sets up a watch on a Consul KV pair and triggers actions on changes.
-func (b *Ballot) watch() error {
-	log.WithFields(log.Fields{
-		"caller": "watch",
-	}).Trace("Setting up watch on key")
-
-	params := map[string]interface{}{
-		"type": "key",
-		"key":  b.Key,
-	}
-	if b.Token != "" {
-		params["token"] = b.Token
-	}
-
-	wp, err := watch.Parse(params)
-	if err != nil {
-		return fmt.Errorf("failed to parse watch parameters: %s", err)
-	}
-
-	wp.Handler = func(idx uint64, data interface{}) {
-		if data == nil {
-			log.WithFields(log.Fields{
-				"caller": "watch",
-			}).Error("Received nil data on watch")
-			return
-		}
-
-		kvPair, ok := data.(*api.KVPair)
-		if !ok {
-			log.WithFields(log.Fields{
-				"caller": "watch",
-			}).Error("Unexpected data type on watch")
-			return
-		}
-
-		b.handleKVChange(kvPair)
-	}
-
-	go func() {
-		if err := wp.RunWithClientAndHclog(b.client.(*api.Client), nil); err != nil {
-			log.WithFields(log.Fields{
-				"caller": "watch",
-				"error":  err,
-			}).Error("Watch failed")
-		}
-	}()
-
-	return nil
-}
-
-// handleKVChange handles changes to the KV pair being watched.
-func (b *Ballot) handleKVChange(kvPair *api.KVPair) {
-	electionPayload := &ElectionPayload{}
-	if err := json.Unmarshal(kvPair.Value, electionPayload); err != nil {
-		log.WithFields(log.Fields{
-			"caller": "handleKVChange",
-			"error":  err,
-		}).Error("Failed to unmarshal election payload")
-		return
-	}
-
-	if b.sessionID.Load() != nil && electionPayload.SessionID == b.sessionID.Load().(string) {
-		b.executePromoteCommand(electionPayload)
-	} else {
-		b.executeDemoteCommand(electionPayload)
-	}
-}
-
-// executePromoteCommand executes the command for promotion.
-func (b *Ballot) executePromoteCommand(electionPayload *ElectionPayload) {
-	if b.ExecOnPromote != "" {
-		log.WithFields(log.Fields{
-			"caller": "executePromoteCommand",
-		}).Info("Executing promote command")
-		if out, err := b.runCommand(b.ExecOnPromote, electionPayload); err != nil {
-			log.WithFields(log.Fields{
-				"caller": "executePromoteCommand",
-				"error":  err,
-			}).Error("Failed to execute promote command")
-		} else {
-			log.WithFields(log.Fields{
-				"caller": "executePromoteCommand",
-				"output": string(out),
-			}).Info("Promote command executed successfully")
-		}
-	}
-}
-
-// executeDemoteCommand executes the command for demotion.
-func (b *Ballot) executeDemoteCommand(electionPayload *ElectionPayload) {
-	if b.ExecOnDemote != "" {
-		log.WithFields(log.Fields{
-			"caller": "executeDemoteCommand",
-		}).Info("Executing demote command")
-		if out, err := b.runCommand(b.ExecOnDemote, electionPayload); err != nil {
-			log.WithFields(log.Fields{
-				"caller": "executeDemoteCommand",
-				"error":  err,
-			}).Error("Failed to execute demote command")
-		} else {
-			log.WithFields(log.Fields{
-				"caller": "executeDemoteCommand",
-				"output": string(out),
-			}).Info("Demote command executed successfully")
-		}
-	}
 }
