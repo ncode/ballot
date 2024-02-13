@@ -178,3 +178,27 @@ func TestIsLeader(t *testing.T) {
 		assert.False(t, b.IsLeader())
 	})
 }
+
+type MockConsulClient struct {
+	mock.Mock
+}
+
+func (m *MockConsulClient) Agent() *api.Agent {
+	args := m.Called()
+	return args.Get(0).(*api.Agent)
+}
+
+func (m *MockConsulClient) Catalog() *api.Catalog {
+	args := m.Called()
+	return args.Get(0).(*api.Catalog)
+}
+
+func (m *MockConsulClient) KV() *api.KV {
+	args := m.Called()
+	return args.Get(0).(*api.KV)
+}
+
+func (m *MockConsulClient) Session() *api.Session {
+	args := m.Called()
+	return args.Get(0).(*api.Session)
+}
