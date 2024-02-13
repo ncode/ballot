@@ -11,5 +11,5 @@ election:
       serviceChecks:
         - service:election2
       primaryTag: primary
-      execOnPromote: '/usr/bin/say I am da boss'
-      execOnDemote: '/usr/bin/say I am no longer da boss'
+      execOnPromote: '/usr/bin/say primary'
+      execOnDemote: '/usr/bin/say secondary'

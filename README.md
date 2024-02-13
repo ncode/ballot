@@ -11,7 +11,12 @@ Consul based leader election with tagging support and hooks
 
 Consul lacks a built-in feature for leader election among registered services. This tool is designed to fill that gap. It functions by designating a leader among multiple services, marking the chosen leader with a specified tag. Additionally, it allows for the execution of a script whenever a leader election occurs.
 
-### How do I test it?
+### How does it work?
+
+Ballot uses Consul's session API to create a session for each service. The session is then used to create a lock on a key. The service that successfully creates the lock is elected as the leader. The leader is then tagged with a specified tag. The leader election is monitored and the leader is updated if the current leader is no longer healthy.
+More info about the sessions here [https://developer.hashicorp.com/consul/tutorials/developer-configuration/application-leader-elections](https://developer.hashicorp.com/consul/tutorials/developer-configuration/application-leader-elections).
+
+### How do I use it?
 
 1. Install Ballot
 ```bash
@@ -53,10 +58,33 @@ $PORT      # Port of the service
 $SESSIONID # Current SessionID of the elected master
 ```
 
+### Configuration
+
+The configuration file is a yaml file with the following structure:
+
+```yaml
+consul:
+  token:                                    # Consul token
+election:
+  enabled:
+    - my-service-name                       # Name of the service enabled for election
+  services:
+    my-service-name:                        # Name of the service
+      id: my-service-name                   # ID of the service
+      key: my-service-name                  # Key to be used for the lock in Consul, this should be the same across all nodes
+      token:                                # Token to be used for the session in Consul
+      serviceChecks:                        # List of checks to be used to determine the health of the service
+        - ping                              # Name of the check
+      primaryTag: primary                   # Tag to be used to mark the leader
+      execOnPromote: '/bin/echo primary'    # Command to be executed when the service is elected as leader
+      execOnDemote: '/bin/echo secondary'   # Command to be executed when the service is demoted as leader
+      ttl: 10s                              # TTL for the session
+      lockDelay: 5s                         # Lock delay for the session
+```
+
 ### TODO:
 
-- Write tests
+- Write more tests
 - Add more examples
-- Re-enable the hooks on state change
 - Allow to pre-define the preferred leader
 - Update the docks with the lock delays and timeouts

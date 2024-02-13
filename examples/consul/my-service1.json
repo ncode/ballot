@@ -11,9 +11,5 @@
     "Interval": "10s",
     "Timeout": "5s"
   },
-  "EnableTagOverride": true,
-  "Weights": {
-    "Passing": 10,
-    "Warning": 1
-  }
+  "EnableTagOverride": true
 }
