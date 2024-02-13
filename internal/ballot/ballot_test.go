@@ -103,7 +103,7 @@ func TestRunCommand(t *testing.T) {
 
 	// Create a Ballot instance with the mock executor
 	b := &Ballot{
-		exec: mockExecutor,
+		executor: mockExecutor,
 	}
 
 	// Define the command to run

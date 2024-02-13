@@ -86,6 +86,5 @@ election:
 
 - Write more tests
 - Add more examples
-- Re-enable the hooks on state change
 - Allow to pre-define the preferred leader
 - Update the docks with the lock delays and timeouts

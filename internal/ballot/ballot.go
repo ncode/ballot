@@ -33,6 +33,12 @@ type ElectionPayload struct {
 	SessionID string
 }
 
+type commandExecutor struct{}
+
+func (c *commandExecutor) Command(name string, arg ...string) *exec.Cmd {
+	return exec.Command(name, arg...)
+}
+
 // New returns a new Ballot instance.
 func New(ctx context.Context, name string) (b *Ballot, err error) {
 	if ctx == nil {
@@ -55,6 +61,7 @@ func New(ctx context.Context, name string) (b *Ballot, err error) {
 	b.leader.Store(false)
 	b.Token = consulConfig.Token
 	b.ctx = ctx
+	b.executor = &commandExecutor{}
 
 	b.Name = name
 	if b.LockDelay == 0 {
@@ -84,7 +91,7 @@ type Ballot struct {
 	leader        atomic.Bool     `mapstructure:"-"`
 	client        ConsulClient    `mapstructure:"-"`
 	ctx           context.Context `mapstructure:"-"`
-	exec          CommandExecutor `mapstructure:"-"`
+	executor      CommandExecutor `mapstructure:"-"`
 }
 
 // Copy *api.AgentService to *api.AgentServiceRegistration
@@ -154,7 +161,7 @@ func (b *Ballot) runCommand(command string, electionPayload *ElectionPayload) ([
 	if err != nil {
 		return nil, err
 	}
-	cmd := b.exec.Command(args[0], args[1:]...)
+	cmd := b.executor.Command(args[0], args[1:]...)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("ADDRESS=%s", electionPayload.Address))
 	cmd.Env = append(cmd.Env, fmt.Sprintf("PORT=%d", electionPayload.Port))
 	cmd.Env = append(cmd.Env, fmt.Sprintf("SESSIONID=%s", electionPayload.SessionID))
@@ -162,7 +169,7 @@ func (b *Ballot) runCommand(command string, electionPayload *ElectionPayload) ([
 }
 
 // updateServiceTags updates the service tags.
-func (b *Ballot) updateServiceTags() error {
+func (b *Ballot) updateServiceTags(isLeader bool) error {
 	service, _, err := b.getService()
 	if err != nil {
 		return err
@@ -175,16 +182,45 @@ func (b *Ballot) updateServiceTags() error {
 	hasPrimaryTag := slices.Contains(registration.Tags, b.PrimaryTag)
 
 	// Update tags based on leadership status
-	if b.IsLeader() && !hasPrimaryTag {
+	if isLeader && !hasPrimaryTag {
 		// Add primary tag if not present and this node is the leader
 		registration.Tags = append(registration.Tags, b.PrimaryTag)
-	} else if !b.IsLeader() && hasPrimaryTag {
+	} else if !isLeader && hasPrimaryTag {
 		// Remove primary tag if present and this node is not the leader
 		index := slices.Index(registration.Tags, b.PrimaryTag)
 		registration.Tags = append(registration.Tags[:index], registration.Tags[index+1:]...)
 	} else {
 		// No changes needed
 		return nil
+	}
+
+	// Run the command associated with the new leadership status
+	var command string
+	if isLeader {
+		command = b.ExecOnPromote
+	} else {
+		command = b.ExecOnDemote
+	}
+	if command != "" && b.executor != nil {
+		go func(isLeader bool, command string) {
+			// Run the command in a separate goroutine
+			ctx, cancel := context.WithTimeout(b.ctx, (b.TTL+b.LockDelay)*2)
+			defer cancel()
+			payload, err := b.waitForNextValidSessionData(ctx)
+			output, err := b.runCommand(command, payload)
+			if err != nil {
+				log.WithFields(log.Fields{
+					"caller":   "updateLeadershipStatus",
+					"isLeader": isLeader,
+					"error":    err,
+				}).Error("failed to run command")
+			}
+			log.WithFields(log.Fields{
+				"caller":   "updateLeadershipStatus",
+				"isLeader": isLeader,
+				"output":   string(output),
+			}).Info("ran command")
+		}(isLeader, command)
 	}
 
 	// Log the updated tags
@@ -345,7 +381,7 @@ func (b *Ballot) updateLeadershipStatus(isLeader bool) error {
 	b.leader.Store(isLeader)
 
 	// Update service tags based on leadership status
-	err := b.updateServiceTags()
+	err := b.updateServiceTags(isLeader)
 	if err != nil {
 		return err
 	}
@@ -445,6 +481,25 @@ func (b *Ballot) makeServiceCheck(sc []string) (serviceChecks []api.ServiceCheck
 
 func (b *Ballot) IsLeader() bool {
 	return b.leader.Load() && b.sessionID.Load() != nil
+}
+
+func (b *Ballot) waitForNextValidSessionData(ctx context.Context) (data *ElectionPayload, err error) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			data, err := b.getSessionData()
+			if err != nil {
+				return data, err
+			}
+			if data != nil {
+				return data, nil
+			}
+		case <-ctx.Done():
+			return data, ctx.Err()
+		}
+	}
 }
 
 func (b *Ballot) getSessionData() (data *ElectionPayload, err error) {
