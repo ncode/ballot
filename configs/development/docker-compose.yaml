@@ -1,5 +1,3 @@
-version: '3'
-
 services:
   consul-server:
     image: hashicorp/consul:latest
@@ -8,8 +6,6 @@ services:
     ports:
       - "8500:8500"
       - "8600:8600/udp"
-    networks:
-      - consul-network
 
   consul-agent-1:
     image: hashicorp/consul:latest
@@ -19,8 +15,6 @@ services:
       - consul-server
     volumes:
       - ./consul:/etc/consul:ro
-    networks:
-      - consul-network
 
   consul-agent-2:
     image: hashicorp/consul:latest
@@ -28,8 +22,6 @@ services:
     command: "agent -dev -join=consul-server -bind=0.0.0.0 -config-dir=/etc/consul"
     volumes:
       - ./consul:/etc/consul:ro
-    networks:
-      - consul-network
 
   consul-agent-3:
     image: hashicorp/consul:latest
@@ -39,8 +31,6 @@ services:
       - consul-server
     volumes:
       - ./consul:/etc/consul:ro
-    networks:
-      - consul-network
 
   ballot-1:
     image: ncode/ballot:dev
@@ -52,8 +42,6 @@ services:
       - consul-agent-3
     volumes:
       - ./ballot-1:/etc/ballot:ro
-    networks:
-      - consul-network
 
   ballot-2:
     image: ncode/ballot:dev
@@ -65,8 +53,6 @@ services:
       - consul-agent-3
     volumes:
       - ./ballot-2:/etc/ballot:ro
-    networks:
-      - consul-network
 
   ballot-3:
     image: ncode/ballot:dev
@@ -78,10 +64,4 @@ services:
       - consul-agent-3
     volumes:
       - ./ballot-3:/etc/ballot:ro
-    networks:
-      - consul-network
-
-networks:
-  consul-network:
-    driver: bridge
 
