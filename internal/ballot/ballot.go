@@ -319,8 +319,8 @@ func (b *Ballot) cleanup(payload *ElectionPayload) error {
 }
 
 // election is the main logic for the leader election.
-func (b *Ballot) election() (err error) {
-	err = b.handleServiceCriticalState()
+func (b *Ballot) election() error {
+	err := b.handleServiceCriticalState()
 	if err != nil {
 		return err
 	}
@@ -337,8 +337,8 @@ func (b *Ballot) election() (err error) {
 	}
 
 	// Prepare the election payload
-	sessionIDPtr := b.sessionID.Load().(*string)
-	if sessionIDPtr == nil {
+	sessionIDPtr, ok := b.getSessionID()
+	if !ok || sessionIDPtr == nil {
 		return fmt.Errorf("session ID is nil")
 	}
 	electionPayload := &ElectionPayload{
@@ -349,9 +349,14 @@ func (b *Ballot) election() (err error) {
 
 	// Attempt to acquire leadership
 	if !b.leader.Load() && sessionIDPtr != nil {
-		_, _, err = b.attemptLeadershipAcquisition(electionPayload)
+		acquired, _, err := b.attemptLeadershipAcquisition(electionPayload)
 		if err != nil {
 			return fmt.Errorf("failed to acquire lock: %s", err)
+		}
+		if acquired {
+			log.WithFields(log.Fields{
+				"caller": "election",
+			}).Info("Acquired leadership")
 		}
 	}
 
@@ -371,8 +376,8 @@ func (b *Ballot) attemptLeadershipAcquisition(electionPayload *ElectionPayload) 
 		return false, nil, fmt.Errorf("failed to marshal election payload: %s", err)
 	}
 
-	sessionIDPtr := b.sessionID.Load().(*string)
-	if sessionIDPtr == nil {
+	sessionIDPtr, ok := b.getSessionID()
+	if !ok || sessionIDPtr == nil {
 		return false, nil, fmt.Errorf("session ID is nil")
 	}
 
@@ -382,7 +387,12 @@ func (b *Ballot) attemptLeadershipAcquisition(electionPayload *ElectionPayload) 
 		Value:   payload,
 	}
 
-	return b.client.KV().Acquire(content, nil)
+	acquired, meta, err := b.client.KV().Acquire(content, nil)
+	if err != nil {
+		return false, meta, err
+	}
+
+	return acquired, meta, nil
 }
 
 // verifyAndUpdateLeadershipStatus checks the current session data and updates the leadership status.
@@ -399,13 +409,13 @@ func (b *Ballot) verifyAndUpdateLeadershipStatus() error {
 		return nil
 	}
 
-	sessionIDPtr := b.sessionID.Load().(*string)
-	isCurrentLeader := sessionIDPtr != nil && currentSessionData.SessionID == *sessionIDPtr
+	sessionIDPtr, ok := b.getSessionID()
+	isCurrentLeader := ok && sessionIDPtr != nil && currentSessionData.SessionID == *sessionIDPtr
 	return b.updateLeadershipStatus(isCurrentLeader)
 }
 
 // Run is the main loop for the leader election.
-func (b *Ballot) Run() (err error) {
+func (b *Ballot) Run() error {
 	tickerInterval := b.TTL / 2
 	if tickerInterval < time.Second {
 		tickerInterval = time.Second
@@ -424,7 +434,7 @@ func (b *Ballot) Run() (err error) {
 				}).Error("Failed to run election")
 			}
 		case <-b.ctx.Done():
-			return err
+			return nil
 		}
 	}
 }
@@ -476,12 +486,12 @@ func (b *Ballot) handleServiceCriticalState() error {
 }
 
 // session is responsible for creating and renewing the session.
-func (b *Ballot) session() (err error) {
+func (b *Ballot) session() error {
 	if b.client == nil {
 		return fmt.Errorf("consul client is required")
 	}
-	sessionIDPtr := b.sessionID.Load().(*string)
-	if sessionIDPtr != nil {
+	sessionIDPtr, ok := b.getSessionID()
+	if ok && sessionIDPtr != nil {
 		currentSessionID := *sessionIDPtr
 		sessionInfo, _, err := b.client.Session().Info(currentSessionID, nil)
 		if err != nil {
@@ -534,22 +544,27 @@ func (b *Ballot) session() (err error) {
 			b.sessionID.Store((*string)(nil))
 		}
 	}()
-	return err
+	return nil
+}
+
+func (b *Ballot) getSessionID() (*string, bool) {
+	sessionIDValue := b.sessionID.Load()
+	if sessionIDValue == nil {
+		return nil, false
+	}
+	sessionIDPtr, ok := sessionIDValue.(*string)
+	return sessionIDPtr, ok
 }
 
 func (b *Ballot) IsLeader() bool {
-	sessionIDValue := b.sessionID.Load()
-	if sessionIDValue == nil {
-		return false
-	}
-	sessionIDPtr, ok := sessionIDValue.(*string)
+	sessionIDPtr, ok := b.getSessionID()
 	if !ok || sessionIDPtr == nil {
 		return false
 	}
 	return b.leader.Load()
 }
 
-func (b *Ballot) waitForNextValidSessionData(ctx context.Context) (data *ElectionPayload, err error) {
+func (b *Ballot) waitForNextValidSessionData(ctx context.Context) (*ElectionPayload, error) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -563,38 +578,39 @@ func (b *Ballot) waitForNextValidSessionData(ctx context.Context) (data *Electio
 				return data, nil
 			}
 		case <-ctx.Done():
-			return data, ctx.Err()
+			return nil, ctx.Err()
 		}
 	}
 }
 
-func (b *Ballot) getSessionData() (data *ElectionPayload, err error) {
+func (b *Ballot) getSessionData() (*ElectionPayload, error) {
 	sessionKey, _, err := b.client.KV().Get(b.Key, nil)
 	if err != nil {
-		return data, err
+		return nil, err
 	}
 	if sessionKey == nil {
-		return data, err
+		return nil, nil
 	}
+	var data *ElectionPayload
 	err = json.Unmarshal(sessionKey.Value, &data)
 	if err != nil {
-		return data, err
+		return nil, err
 	}
 
 	return data, nil
 }
 
 // releaseSession releases the session.
-func (b *Ballot) releaseSession() (err error) {
-	sessionIDPtr := b.sessionID.Load().(*string)
-	if sessionIDPtr == nil {
+func (b *Ballot) releaseSession() error {
+	sessionIDPtr, ok := b.getSessionID()
+	if !ok || sessionIDPtr == nil {
 		return nil
 	}
 	sessionID := *sessionIDPtr
-	_, err = b.client.Session().Destroy(sessionID, nil)
+	_, err := b.client.Session().Destroy(sessionID, nil)
 	if err != nil {
 		return err
 	}
 	b.sessionID.Store((*string)(nil))
-	return err
+	return nil
 }
