@@ -14,14 +14,14 @@ services:
     depends_on:
       - consul-server
     volumes:
-      - ./consul:/etc/consul:ro
+      - ./consul/consul-agent-1:/etc/consul:ro
 
   consul-agent-2:
     image: hashicorp/consul:latest
     container_name: consul-agent-2
     command: "agent -dev -join=consul-server -bind=0.0.0.0 -config-dir=/etc/consul"
     volumes:
-      - ./consul:/etc/consul:ro
+      - ./consul/consul-agent-2:/etc/consul:ro
 
   consul-agent-3:
     image: hashicorp/consul:latest
@@ -30,7 +30,7 @@ services:
     depends_on:
       - consul-server
     volumes:
-      - ./consul:/etc/consul:ro
+      - ./consul/consul-agent-3:/etc/consul:ro
 
   ballot-1:
     image: ncode/ballot:dev
