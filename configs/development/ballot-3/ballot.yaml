@@ -5,7 +5,7 @@ election:
   enabled:
     - my-service
   services:
-    my_service:
+    my-service:
       id: my-service3
       key: service/my-service
       token:
