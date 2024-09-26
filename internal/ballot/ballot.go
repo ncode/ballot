@@ -19,12 +19,136 @@ type CommandExecutor interface {
 	CommandContext(ctx context.Context, name string, arg ...string) *exec.Cmd
 }
 
+type consulClient struct {
+	client *api.Client
+}
+
+func (c *consulClient) Agent() AgentInterface {
+	return &AgentWrapper{agent: c.client.Agent()}
+}
+
+func (c *consulClient) Catalog() CatalogInterface {
+	return &CatalogWrapper{catalog: c.client.Catalog()}
+}
+
+func (c *consulClient) Health() HealthInterface {
+	return &HealthWrapper{health: c.client.Health()}
+}
+
+func (c *consulClient) Session() SessionInterface {
+	return &SessionWrapper{session: c.client.Session()}
+}
+
+func (c *consulClient) KV() KVInterface {
+	return &KVWrapper{kv: c.client.KV()}
+}
+
+// AgentInterface is an interface that wraps the Consul agent methods.
+type AgentInterface interface {
+	Service(serviceID string, q *api.QueryOptions) (*api.AgentService, *api.QueryMeta, error)
+	ServiceRegister(service *api.AgentServiceRegistration) error
+}
+
+type AgentWrapper struct {
+	agent *api.Agent
+}
+
+func (a *AgentWrapper) ServiceRegister(service *api.AgentServiceRegistration) error {
+	return a.agent.ServiceRegister(service)
+}
+
+func (a *AgentWrapper) Service(serviceID string, q *api.QueryOptions) (*api.AgentService, *api.QueryMeta, error) {
+	return a.agent.Service(serviceID, q)
+}
+
+// CatalogInterface is an interface that wraps the Consul catalog methods.
+type CatalogInterface interface {
+	Service(serviceName, tag string, q *api.QueryOptions) ([]*api.CatalogService, *api.QueryMeta, error)
+	Register(reg *api.CatalogRegistration, w *api.WriteOptions) (*api.WriteMeta, error)
+}
+
+type CatalogWrapper struct {
+	catalog *api.Catalog
+}
+
+func (c *CatalogWrapper) Service(serviceName, tag string, q *api.QueryOptions) ([]*api.CatalogService, *api.QueryMeta, error) {
+	return c.catalog.Service(serviceName, tag, q)
+}
+
+func (c *CatalogWrapper) Register(reg *api.CatalogRegistration, w *api.WriteOptions) (*api.WriteMeta, error) {
+	return c.catalog.Register(reg, w)
+}
+
+// HealthInterface is an interface that wraps the Consul health methods.
+type HealthInterface interface {
+	Checks(service string, q *api.QueryOptions) ([]*api.HealthCheck, *api.QueryMeta, error)
+}
+
+type HealthWrapper struct {
+	health *api.Health
+}
+
+func (h *HealthWrapper) Checks(service string, q *api.QueryOptions) ([]*api.HealthCheck, *api.QueryMeta, error) {
+	return h.health.Checks(service, q)
+}
+
+// SessionInterface is an interface that wraps the Consul session methods.
+type SessionInterface interface {
+	Create(se *api.SessionEntry, q *api.WriteOptions) (string, *api.WriteMeta, error)
+	Destroy(sessionID string, q *api.WriteOptions) (*api.WriteMeta, error)
+	Info(sessionID string, q *api.QueryOptions) (*api.SessionEntry, *api.QueryMeta, error)
+	RenewPeriodic(initialTTL string, sessionID string, q *api.WriteOptions, doneCh <-chan struct{}) error
+}
+
+type SessionWrapper struct {
+	session *api.Session
+}
+
+func (s *SessionWrapper) Create(se *api.SessionEntry, q *api.WriteOptions) (string, *api.WriteMeta, error) {
+	return s.session.Create(se, q)
+}
+
+func (s *SessionWrapper) Destroy(sessionID string, q *api.WriteOptions) (*api.WriteMeta, error) {
+	return s.session.Destroy(sessionID, q)
+}
+
+func (s *SessionWrapper) Info(sessionID string, q *api.QueryOptions) (*api.SessionEntry, *api.QueryMeta, error) {
+	return s.session.Info(sessionID, q)
+}
+
+func (s *SessionWrapper) RenewPeriodic(initialTTL string, sessionID string, q *api.WriteOptions, doneCh <-chan struct{}) error {
+	return s.session.RenewPeriodic(initialTTL, sessionID, q, doneCh)
+}
+
+// KVInterface is an interface that wraps the Consul KV methods.
+type KVInterface interface {
+	Get(key string, q *api.QueryOptions) (*api.KVPair, *api.QueryMeta, error)
+	Put(p *api.KVPair, q *api.WriteOptions) (*api.WriteMeta, error)
+	Acquire(p *api.KVPair, q *api.WriteOptions) (bool, *api.WriteMeta, error)
+}
+
+type KVWrapper struct {
+	kv *api.KV
+}
+
+func (k *KVWrapper) Get(key string, q *api.QueryOptions) (*api.KVPair, *api.QueryMeta, error) {
+	return k.kv.Get(key, q)
+}
+
+func (k *KVWrapper) Put(p *api.KVPair, q *api.WriteOptions) (*api.WriteMeta, error) {
+	return k.kv.Put(p, q)
+}
+
+func (k *KVWrapper) Acquire(p *api.KVPair, q *api.WriteOptions) (bool, *api.WriteMeta, error) {
+	return k.kv.Acquire(p, q)
+}
+
 type ConsulClient interface {
-	Agent() *api.Agent
-	Catalog() *api.Catalog
-	Health() *api.Health
-	KV() *api.KV
-	Session() *api.Session
+	Agent() AgentInterface
+	Catalog() CatalogInterface
+	Health() HealthInterface
+	KV() KVInterface
+	Session() SessionInterface
 }
 
 type ElectionPayload struct {
@@ -57,7 +181,7 @@ func New(ctx context.Context, name string) (*Ballot, error) {
 	if err != nil {
 		return nil, err
 	}
-	b.client = client
+	b.client = &consulClient{client: client}
 	b.leader.Store(false)
 	b.Token = consulConfig.Token
 	b.ctx = ctx
