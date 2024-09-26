@@ -2,8 +2,10 @@ package ballot
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/consul/api"
 	"github.com/spf13/viper"
@@ -183,32 +185,434 @@ func TestIsLeader(t *testing.T) {
 	})
 }
 
-// MockConsulClient is a mock implementation of the ConsulClient interface
+func TestGetService(t *testing.T) {
+	t.Run("service is found successfully", func(t *testing.T) {
+		// Set up the mock Agent
+		mockAgent := new(MockAgent)
+		serviceID := "test_service_id"
+		serviceName := "test_service"
+
+		mockAgent.On("Service", serviceID, mock.Anything).Return(&api.AgentService{
+			ID:      serviceID,
+			Service: serviceName,
+		}, nil, nil)
+
+		// Set up the mock Catalog
+		mockCatalog := new(MockCatalog)
+		mockCatalog.On("Service", serviceName, "primary", mock.Anything).Return([]*api.CatalogService{
+			{
+				ServiceID:   serviceID,
+				ServiceName: serviceName,
+			},
+		}, nil, nil)
+
+		// Set up the mock ConsulClient
+		mockClient := &MockConsulClient{}
+		mockClient.On("Agent").Return(mockAgent)
+		mockClient.On("Catalog").Return(mockCatalog)
+		mockClient.On("Health").Return(new(MockHealth))
+		mockClient.On("Session").Return(new(MockSession))
+		mockClient.On("KV").Return(new(MockKV))
+
+		b := &Ballot{
+			client:     mockClient,
+			ID:         serviceID,
+			Name:       serviceName,
+			PrimaryTag: "primary",
+		}
+
+		service, catalogServices, err := b.getService()
+		assert.NoError(t, err)
+		assert.NotNil(t, service)
+		assert.NotNil(t, catalogServices)
+		assert.Equal(t, serviceID, service.ID)
+		assert.Equal(t, serviceName, service.Service)
+		assert.Equal(t, 1, len(catalogServices))
+		assert.Equal(t, serviceID, catalogServices[0].ServiceID)
+	})
+}
+
+func TestIsLeader_EdgeCases(t *testing.T) {
+	t.Run("leader is true but sessionID is nil", func(t *testing.T) {
+		b := &Ballot{}
+		b.leader.Store(true)
+		b.sessionID.Store((*string)(nil))
+		assert.False(t, b.IsLeader())
+	})
+
+	t.Run("leader status changes dynamically", func(t *testing.T) {
+		b := &Ballot{}
+		sessionID := "session"
+		b.sessionID.Store(&sessionID)
+
+		b.leader.Store(false)
+		assert.False(t, b.IsLeader())
+
+		b.leader.Store(true)
+		assert.True(t, b.IsLeader())
+
+		b.leader.Store(false)
+		assert.False(t, b.IsLeader())
+	})
+}
+
+func TestReleaseSession(t *testing.T) {
+	t.Run("session ID is nil", func(t *testing.T) {
+		b := &Ballot{
+			client: &MockConsulClient{},
+		}
+		err := b.releaseSession()
+		assert.NoError(t, err)
+	})
+
+	t.Run("session is successfully destroyed", func(t *testing.T) {
+		sessionID := "session"
+		b := &Ballot{}
+		b.sessionID.Store(&sessionID)
+
+		mockSession := new(MockSession)
+		mockSession.On("Destroy", sessionID, (*api.WriteOptions)(nil)).Return(nil, nil)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Session").Return(mockSession)
+
+		b.client = mockClient
+
+		err := b.releaseSession()
+		assert.NoError(t, err)
+		sessionIDPtr, ok := b.getSessionID()
+		assert.True(t, ok)          // Expect ok to be true
+		assert.Nil(t, sessionIDPtr) // sessionIDPtr should be nil
+	})
+
+	t.Run("error occurs when destroying session", func(t *testing.T) {
+		sessionID := "session"
+		b := &Ballot{}
+		b.sessionID.Store(&sessionID)
+
+		expectedErr := fmt.Errorf("failed to destroy session")
+		mockSession := new(MockSession)
+		mockSession.On("Destroy", sessionID, (*api.WriteOptions)(nil)).Return(nil, expectedErr)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Session").Return(mockSession)
+
+		b.client = mockClient
+
+		err := b.releaseSession()
+		assert.Error(t, err)
+		assert.Equal(t, expectedErr, err)
+	})
+}
+
+func TestGetSessionID(t *testing.T) {
+	b := &Ballot{}
+
+	t.Run("session ID is set", func(t *testing.T) {
+		sessionID := "session"
+		b.sessionID.Store(&sessionID)
+		id, ok := b.getSessionID()
+		assert.True(t, ok)
+		assert.NotNil(t, id)
+		assert.Equal(t, sessionID, *id)
+	})
+
+	t.Run("session ID is nil", func(t *testing.T) {
+		b.sessionID.Store((*string)(nil))
+		id, ok := b.getSessionID()
+		assert.True(t, ok)
+		assert.Nil(t, id)
+	})
+}
+
+func TestSession(t *testing.T) {
+	t.Run("session is created successfully", func(t *testing.T) {
+		sessionID := "session"
+
+		mockSession := new(MockSession)
+		mockSession.On("Create", mock.Anything, (*api.WriteOptions)(nil)).Return(sessionID, nil, nil)
+		mockSession.On("RenewPeriodic", mock.Anything, sessionID, (*api.WriteOptions)(nil), mock.Anything).Return(nil)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Session").Return(mockSession)
+
+		b := &Ballot{
+			client: mockClient,
+			TTL:    10 * time.Second,
+			ctx:    context.Background(),
+		}
+
+		err := b.session()
+		assert.NoError(t, err)
+		storedSessionID, ok := b.getSessionID()
+		assert.True(t, ok)
+		assert.NotNil(t, storedSessionID)
+		assert.Equal(t, sessionID, *storedSessionID)
+	})
+
+	t.Run("session creation fails", func(t *testing.T) {
+		expectedErr := fmt.Errorf("session creation error")
+
+		mockSession := new(MockSession)
+		mockSession.On("Create", mock.Anything, (*api.WriteOptions)(nil)).Return("", nil, expectedErr)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Session").Return(mockSession)
+
+		b := &Ballot{
+			client: mockClient,
+			TTL:    10 * time.Second,
+			ctx:    context.Background(),
+		}
+
+		err := b.session()
+		assert.Error(t, err)
+		assert.Equal(t, expectedErr, err)
+	})
+}
+
+func TestHandleServiceCriticalState(t *testing.T) {
+	t.Run("service is found successfully", func(t *testing.T) {
+		// Set up the mock Agent
+		mockAgent := new(MockAgent)
+		serviceID := "test_service_id"
+		serviceName := "test_service"
+
+		mockAgent.On("Service", serviceID, mock.Anything).Return(&api.AgentService{
+			ID:      serviceID,
+			Service: serviceName,
+		}, nil, nil)
+
+		// Set up the mock Catalog
+		mockCatalog := new(MockCatalog)
+		mockCatalog.On("Service", serviceName, "primary", mock.Anything).Return([]*api.CatalogService{
+			{
+				ServiceID:   serviceID,
+				ServiceName: serviceName,
+			},
+		}, nil, nil)
+
+		// Set up the mock ConsulClient
+		mockClient := &MockConsulClient{}
+		mockClient.On("Agent").Return(mockAgent)
+		mockClient.On("Catalog").Return(mockCatalog)
+		mockClient.On("Health").Return(new(MockHealth))
+		mockClient.On("Session").Return(new(MockSession))
+		mockClient.On("KV").Return(new(MockKV))
+
+		b := &Ballot{
+			client:     mockClient,
+			ID:         serviceID,
+			Name:       serviceName,
+			PrimaryTag: "primary",
+		}
+
+		service, catalogServices, err := b.getService()
+		assert.NoError(t, err)
+		assert.NotNil(t, service)
+		assert.NotNil(t, catalogServices)
+		assert.Equal(t, serviceID, service.ID)
+		assert.Equal(t, serviceName, service.Service)
+		assert.Equal(t, 1, len(catalogServices))
+		assert.Equal(t, serviceID, catalogServices[0].ServiceID)
+	})
+
+	t.Run("service is in passing state", func(t *testing.T) {
+		mockHealth := new(MockHealth)
+		mockHealth.On("Checks", "test_service", (*api.QueryOptions)(nil)).Return([]*api.HealthCheck{
+			{Status: "passing"},
+		}, nil, nil)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Health").Return(mockHealth)
+
+		b := &Ballot{
+			client: mockClient,
+			Name:   "test_service",
+		}
+
+		err := b.handleServiceCriticalState()
+		assert.NoError(t, err)
+	})
+
+	t.Run("error occurs when getting health checks", func(t *testing.T) {
+		expectedErr := fmt.Errorf("health check error")
+		mockHealth := new(MockHealth)
+		mockHealth.On("Checks", "test_service", (*api.QueryOptions)(nil)).Return(nil, nil, expectedErr)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Health").Return(mockHealth)
+
+		b := &Ballot{
+			client: mockClient,
+			Name:   "test_service",
+		}
+
+		err := b.handleServiceCriticalState()
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, expectedErr.Error())
+	})
+}
+
+// MockConsulClient is a mock implementation of the api.Client interface
 type MockConsulClient struct {
 	mock.Mock
 }
 
-func (m *MockConsulClient) Agent() *api.Agent {
+func (m *MockConsulClient) Agent() AgentInterface {
 	args := m.Called()
-	return args.Get(0).(*api.Agent)
+	return args.Get(0).(AgentInterface)
 }
 
-func (m *MockConsulClient) Catalog() *api.Catalog {
+func (m *MockConsulClient) Catalog() CatalogInterface {
 	args := m.Called()
-	return args.Get(0).(*api.Catalog)
+	return args.Get(0).(CatalogInterface)
 }
 
-func (m *MockConsulClient) KV() *api.KV {
+func (m *MockConsulClient) Health() HealthInterface {
 	args := m.Called()
-	return args.Get(0).(*api.KV)
+	return args.Get(0).(HealthInterface)
 }
 
-func (m *MockConsulClient) Session() *api.Session {
+func (m *MockConsulClient) KV() KVInterface {
 	args := m.Called()
-	return args.Get(0).(*api.Session)
+	return args.Get(0).(KVInterface)
 }
 
-func (m *MockConsulClient) Health() *api.Health {
+func (m *MockConsulClient) Session() SessionInterface {
 	args := m.Called()
-	return args.Get(0).(*api.Health)
+	return args.Get(0).(SessionInterface)
+}
+
+// MockAgent is a mock implementation of the api.Agent interface
+type MockAgent struct {
+	mock.Mock
+}
+
+func (m *MockAgent) Service(serviceID string, q *api.QueryOptions) (*api.AgentService, *api.QueryMeta, error) {
+	args := m.Called(serviceID, q)
+	var service *api.AgentService
+	if args.Get(0) != nil {
+		service = args.Get(0).(*api.AgentService)
+	}
+	var meta *api.QueryMeta
+	if args.Get(1) != nil {
+		meta = args.Get(1).(*api.QueryMeta)
+	}
+	return service, meta, args.Error(2)
+}
+
+func (m *MockAgent) ServiceRegister(service *api.AgentServiceRegistration) error {
+	args := m.Called(service)
+	return args.Error(0)
+}
+
+func (m *MockAgent) ServiceDeregister(serviceID string) error {
+	args := m.Called(serviceID)
+	return args.Error(0)
+}
+
+// MockCatalog is a mock implementation of the api.Catalog interface
+type MockCatalog struct {
+	mock.Mock
+}
+
+func (m *MockCatalog) Service(serviceName, tag string, q *api.QueryOptions) ([]*api.CatalogService, *api.QueryMeta, error) {
+	args := m.Called(serviceName, tag, q)
+	var services []*api.CatalogService
+	if args.Get(0) != nil {
+		services = args.Get(0).([]*api.CatalogService)
+	}
+	var meta *api.QueryMeta
+	if args.Get(1) != nil {
+		meta = args.Get(1).(*api.QueryMeta)
+	}
+	return services, meta, args.Error(2)
+}
+
+func (m *MockCatalog) Register(reg *api.CatalogRegistration, w *api.WriteOptions) (*api.WriteMeta, error) {
+	args := m.Called(reg, w)
+	var meta *api.WriteMeta
+	if args.Get(0) != nil {
+		meta = args.Get(0).(*api.WriteMeta)
+	}
+	return meta, args.Error(1)
+}
+
+func (m *MockCatalog) Deregister(dereg *api.CatalogDeregistration, w *api.WriteOptions) (*api.WriteMeta, error) {
+	args := m.Called(dereg, w)
+	var meta *api.WriteMeta
+	if args.Get(0) != nil {
+		meta = args.Get(0).(*api.WriteMeta)
+	}
+	return meta, args.Error(1)
+}
+
+// MockSession is a mock implementation of the api.Session interface
+type MockSession struct {
+	mock.Mock
+}
+
+func (m *MockSession) Create(se *api.SessionEntry, q *api.WriteOptions) (string, *api.WriteMeta, error) {
+	args := m.Called(se, q)
+	sessionID := args.String(0)
+	var meta *api.WriteMeta
+	if args.Get(1) != nil {
+		meta = args.Get(1).(*api.WriteMeta)
+	}
+	return sessionID, meta, args.Error(2)
+}
+
+func (m *MockSession) Destroy(sessionID string, q *api.WriteOptions) (*api.WriteMeta, error) {
+	args := m.Called(sessionID, q)
+	var meta *api.WriteMeta
+	if args.Get(0) != nil {
+		meta = args.Get(0).(*api.WriteMeta)
+	}
+	return meta, args.Error(1)
+}
+
+func (m *MockSession) Info(sessionID string, q *api.QueryOptions) (*api.SessionEntry, *api.QueryMeta, error) {
+	args := m.Called(sessionID, q)
+	return args.Get(0).(*api.SessionEntry), args.Get(1).(*api.QueryMeta), args.Error(2)
+}
+
+func (m *MockSession) RenewPeriodic(initialTTL string, sessionID string, q *api.WriteOptions, doneCh <-chan struct{}) error {
+	args := m.Called(initialTTL, sessionID, q, doneCh)
+	return args.Error(0)
+}
+
+// MockHealth is a mock implementation of the api.Health interface
+type MockHealth struct {
+	mock.Mock
+}
+
+func (m *MockHealth) Checks(service string, q *api.QueryOptions) ([]*api.HealthCheck, *api.QueryMeta, error) {
+	args := m.Called(service, q)
+	checks, _ := args.Get(0).([]*api.HealthCheck)
+	meta, _ := args.Get(1).(*api.QueryMeta)
+	return checks, meta, args.Error(2)
+}
+
+// MockKV is a mock implementation of the api.KV interface
+type MockKV struct {
+	mock.Mock
+}
+
+func (m *MockKV) Get(key string, q *api.QueryOptions) (*api.KVPair, *api.QueryMeta, error) {
+	args := m.Called(key, q)
+	pair, _ := args.Get(0).(*api.KVPair)
+	meta, _ := args.Get(1).(*api.QueryMeta)
+	return pair, meta, args.Error(2)
+}
+
+func (m *MockKV) Put(p *api.KVPair, q *api.WriteOptions) (*api.WriteMeta, error) {
+	args := m.Called(p, q)
+	meta, _ := args.Get(0).(*api.WriteMeta)
+	return meta, args.Error(1)
+}
+
+func (m *MockKV) Acquire(p *api.KVPair, q *api.WriteOptions) (bool, *api.WriteMeta, error) {
+	args := m.Called(p, q)
+	return args.Bool(0), args.Get(1).(*api.WriteMeta), args.Error(2)
 }
