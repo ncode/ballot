@@ -6,15 +6,37 @@ import (
 	"testing"
 
 	"github.com/hashicorp/consul/api"
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
 
 func TestNew(t *testing.T) {
 	t.Run("successful new", func(t *testing.T) {
+		// Set up the necessary configuration
+		viper.Set("election.services.test.id", "test_service_id")
+		viper.Set("election.services.test.key", "election/test_service/leader")
+		viper.Set("election.services.test.primaryTag", "primary")
+		viper.Set("election.services.test.serviceChecks", []string{"service:test_service_id"})
+		viper.Set("election.services.test.execOnPromote", "echo Promoted to leader")
+		viper.Set("election.services.test.execOnDemote", "echo Demoted from leader")
+		viper.Set("election.services.test.ttl", "10s")
+		viper.Set("election.services.test.lockDelay", "3s")
+
+		// Ensure viper configuration is reset after the test
+		defer func() {
+			viper.Reset()
+		}()
+
+		// Call the New function
 		b, err := New(context.Background(), "test")
 		assert.NoError(t, err)
 		assert.NotNil(t, b)
+
+		// Verify that the Ballot instance has the expected values
+		assert.Equal(t, "test_service_id", b.ID)
+		assert.Equal(t, "election/test_service/leader", b.Key)
+		assert.Equal(t, "primary", b.PrimaryTag)
 	})
 
 	t.Run("failure due to nil context", func(t *testing.T) {
@@ -45,8 +67,9 @@ func TestCopyServiceToRegistration(t *testing.T) {
 		assert.Equal(t, service.Address, registration.Address)
 	})
 
-	t.Run("failure due to nil service", func(t *testing.T) {
-		assert.Panics(t, func() { b.copyServiceToRegistration(nil) })
+	t.Run("handles nil service gracefully", func(t *testing.T) {
+		registration := b.copyServiceToRegistration(nil)
+		assert.Nil(t, registration)
 	})
 }
 
@@ -79,11 +102,11 @@ func TestCopyCatalogServiceToRegistration(t *testing.T) {
 		assert.Equal(t, service.ServiceWeights.Passing, registration.Service.Weights.Passing)
 		assert.Equal(t, service.ServiceWeights.Warning, registration.Service.Weights.Warning)
 		assert.Equal(t, service.ServiceEnableTagOverride, registration.Service.EnableTagOverride)
-
 	})
 
-	t.Run("failure due to nil service", func(t *testing.T) {
-		assert.Panics(t, func() { b.copyCatalogServiceToRegistration(nil) })
+	t.Run("handles nil service gracefully", func(t *testing.T) {
+		registration := b.copyCatalogServiceToRegistration(nil)
+		assert.Nil(t, registration)
 	})
 }
 
