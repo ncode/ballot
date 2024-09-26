@@ -40,7 +40,7 @@ func (c *commandExecutor) CommandContext(ctx context.Context, name string, arg .
 }
 
 // New returns a new Ballot instance.
-func New(ctx context.Context, name string) (b *Ballot, err error) {
+func New(ctx context.Context, name string) (*Ballot, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("context is required")
 	}
@@ -49,13 +49,13 @@ func New(ctx context.Context, name string) (b *Ballot, err error) {
 	consulConfig.Address = viper.GetString("consul.address")
 	client, err := api.NewClient(consulConfig)
 	if err != nil {
-		return b, err
+		return nil, err
 	}
 
-	b = &Ballot{}
+	b := &Ballot{}
 	err = viper.UnmarshalKey(fmt.Sprintf("election.services.%s", name), b)
 	if err != nil {
-		return b, err
+		return nil, err
 	}
 	b.client = client
 	b.leader.Store(false)
@@ -63,7 +63,13 @@ func New(ctx context.Context, name string) (b *Ballot, err error) {
 	b.ctx = ctx
 	b.executor = &commandExecutor{}
 
-	b.Name = name
+	// Ensure that required fields are set
+	if b.ID == "" {
+		return nil, fmt.Errorf("service ID is required; please set the 'id' field in the configuration")
+	}
+	if b.Name == "" {
+		b.Name = name
+	}
 	if b.LockDelay == 0 {
 		b.LockDelay = 3 * time.Second
 	}
@@ -71,7 +77,7 @@ func New(ctx context.Context, name string) (b *Ballot, err error) {
 		b.TTL = 10 * time.Second
 	}
 
-	return b, err
+	return b, nil
 }
 
 // Ballot is a struct that holds the configuration for the leader election.
