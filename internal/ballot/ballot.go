@@ -102,6 +102,9 @@ type Ballot struct {
 
 // Copy *api.AgentService to *api.AgentServiceRegistration
 func (b *Ballot) copyServiceToRegistration(service *api.AgentService) *api.AgentServiceRegistration {
+	if service == nil {
+		return nil
+	}
 	return &api.AgentServiceRegistration{
 		ID:      service.ID,
 		Name:    service.Service,
@@ -116,6 +119,9 @@ func (b *Ballot) copyServiceToRegistration(service *api.AgentService) *api.Agent
 
 // Copy *api.CatalogService to *api.CatalogRegistration
 func (b *Ballot) copyCatalogServiceToRegistration(service *api.CatalogService) *api.CatalogRegistration {
+	if service == nil {
+		return nil
+	}
 	return &api.CatalogRegistration{
 		ID:              service.ID,
 		Node:            service.Node,
@@ -143,19 +149,22 @@ func (b *Ballot) copyCatalogServiceToRegistration(service *api.CatalogService) *
 // getService returns the registered service.
 func (b *Ballot) getService() (service *api.AgentService, catalogServices []*api.CatalogService, err error) {
 	agent := b.client.Agent()
+	if b.ID == "" {
+		return nil, nil, fmt.Errorf("service ID is empty; please ensure it is set in the configuration")
+	}
 	service, _, err = agent.Service(b.ID, &api.QueryOptions{})
 	if err != nil {
-		return service, nil, err
+		return nil, nil, err
 	}
 	if service == nil {
-		return service, nil, fmt.Errorf("service %s not found", b.ID)
+		return nil, nil, fmt.Errorf("service %s not found", b.ID)
 	}
 	catalog := b.client.Catalog()
 	catalogServices, _, err = catalog.Service(b.Name, b.PrimaryTag, &api.QueryOptions{})
 	if err != nil {
 		return service, nil, err
 	}
-	return service, catalogServices, err
+	return service, catalogServices, nil
 }
 
 // runCommand runs a command and returns the output.
@@ -183,6 +192,9 @@ func (b *Ballot) updateServiceTags(isLeader bool) error {
 
 	// Get a copy of the current service registration
 	registration := b.copyServiceToRegistration(service)
+	if registration == nil {
+		return fmt.Errorf("service registration is nil")
+	}
 
 	// Determine if the primary tag is already present
 	hasPrimaryTag := slices.Contains(registration.Tags, b.PrimaryTag)
@@ -284,6 +296,9 @@ func (b *Ballot) cleanup(payload *ElectionPayload) error {
 
 			// Prepare the catalog registration for update
 			catalogRegistration := b.copyCatalogServiceToRegistration(service)
+			if catalogRegistration == nil || catalogRegistration.Service == nil {
+				continue
+			}
 			catalogRegistration.Service.Tags = updatedTags
 
 			// Update the catalog service
