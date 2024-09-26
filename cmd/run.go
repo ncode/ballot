@@ -16,7 +16,7 @@ limitations under the License.
 package cmd
 
 import (
-	"golang.org/x/net/context"
+	"context"
 	"os"
 
 	"github.com/ncode/ballot/internal/ballot"
@@ -38,6 +38,7 @@ var runCmd = &cobra.Command{
 					"caller": "run",
 					"step":   "New",
 				}).Error(err)
+				os.Exit(1)
 			}
 
 			err = b.Run()
