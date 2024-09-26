@@ -148,10 +148,10 @@ func (b *Ballot) copyCatalogServiceToRegistration(service *api.CatalogService) *
 
 // getService returns the registered service.
 func (b *Ballot) getService() (service *api.AgentService, catalogServices []*api.CatalogService, err error) {
-	agent := b.client.Agent()
 	if b.ID == "" {
 		return nil, nil, fmt.Errorf("service ID is empty; please ensure it is set in the configuration")
 	}
+	agent := b.client.Agent()
 	service, _, err = agent.Service(b.ID, &api.QueryOptions{})
 	if err != nil {
 		return nil, nil, err
