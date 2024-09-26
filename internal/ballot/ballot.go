@@ -1,6 +1,7 @@
 package ballot
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -8,21 +9,20 @@ import (
 	"time"
 
 	"github.com/google/shlex"
-
 	"github.com/hashicorp/consul/api"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 	"golang.org/x/exp/slices"
-	"golang.org/x/net/context"
 )
 
 type CommandExecutor interface {
-	Command(name string, arg ...string) *exec.Cmd
+	CommandContext(ctx context.Context, name string, arg ...string) *exec.Cmd
 }
 
 type ConsulClient interface {
 	Agent() *api.Agent
 	Catalog() *api.Catalog
+	Health() *api.Health
 	KV() *api.KV
 	Session() *api.Session
 }
@@ -35,8 +35,8 @@ type ElectionPayload struct {
 
 type commandExecutor struct{}
 
-func (c *commandExecutor) Command(name string, arg ...string) *exec.Cmd {
-	return exec.Command(name, arg...)
+func (c *commandExecutor) CommandContext(ctx context.Context, name string, arg ...string) *exec.Cmd {
+	return exec.CommandContext(ctx, name, arg...)
 }
 
 // New returns a new Ballot instance.
@@ -87,7 +87,7 @@ type Ballot struct {
 	ConsulAddress string          `mapstructure:"consul.address"`
 	TTL           time.Duration   `mapstructure:"ttl"`
 	LockDelay     time.Duration   `mapstructure:"lockDelay"`
-	sessionID     atomic.Value    `mapstructure:"-"`
+	sessionID     atomic.Value    // stores *string
 	leader        atomic.Bool     `mapstructure:"-"`
 	client        ConsulClient    `mapstructure:"-"`
 	ctx           context.Context `mapstructure:"-"`
@@ -145,7 +145,7 @@ func (b *Ballot) getService() (service *api.AgentService, catalogServices []*api
 		return service, nil, fmt.Errorf("service %s not found", b.ID)
 	}
 	catalog := b.client.Catalog()
-	catalogServices, _, err = catalog.Service(b.ID, b.PrimaryTag, &api.QueryOptions{})
+	catalogServices, _, err = catalog.Service(b.Name, b.PrimaryTag, &api.QueryOptions{})
 	if err != nil {
 		return service, nil, err
 	}
@@ -161,11 +161,11 @@ func (b *Ballot) runCommand(command string, electionPayload *ElectionPayload) ([
 	if err != nil {
 		return nil, err
 	}
-	cmd := b.executor.Command(args[0], args[1:]...)
+	cmd := b.executor.CommandContext(b.ctx, args[0], args[1:]...)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("ADDRESS=%s", electionPayload.Address))
 	cmd.Env = append(cmd.Env, fmt.Sprintf("PORT=%d", electionPayload.Port))
 	cmd.Env = append(cmd.Env, fmt.Sprintf("SESSIONID=%s", electionPayload.SessionID))
-	return cmd.Output()
+	return cmd.CombinedOutput()
 }
 
 // updateServiceTags updates the service tags.
@@ -203,23 +203,40 @@ func (b *Ballot) updateServiceTags(isLeader bool) error {
 	}
 	if command != "" && b.executor != nil {
 		go func(isLeader bool, command string) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.WithFields(log.Fields{
+						"caller": "updateServiceTags",
+						"error":  r,
+					}).Error("Recovered from panic in command execution")
+				}
+			}()
+
 			// Run the command in a separate goroutine
 			ctx, cancel := context.WithTimeout(b.ctx, (b.TTL+b.LockDelay)*2)
 			defer cancel()
-			payload, err := b.waitForNextValidSessionData(ctx)
-			output, err := b.runCommand(command, payload)
-			if err != nil {
+			payload, payloadErr := b.waitForNextValidSessionData(ctx)
+			if payloadErr != nil {
 				log.WithFields(log.Fields{
-					"caller":   "updateLeadershipStatus",
-					"isLeader": isLeader,
-					"error":    err,
-				}).Error("failed to run command")
+					"caller": "updateServiceTags",
+					"error":  payloadErr,
+				}).Error("Failed to get session data")
+				return
 			}
-			log.WithFields(log.Fields{
-				"caller":   "updateLeadershipStatus",
-				"isLeader": isLeader,
-				"output":   string(output),
-			}).Info("ran command")
+			output, cmdErr := b.runCommand(command, payload)
+			if cmdErr != nil {
+				log.WithFields(log.Fields{
+					"caller":   "updateServiceTags",
+					"isLeader": isLeader,
+					"error":    cmdErr,
+				}).Error("Failed to run command")
+			} else {
+				log.WithFields(log.Fields{
+					"caller":   "updateServiceTags",
+					"isLeader": isLeader,
+					"output":   string(output),
+				}).Info("Ran command")
+			}
 		}(isLeader, command)
 	}
 
@@ -299,14 +316,18 @@ func (b *Ballot) election() (err error) {
 	}
 
 	// Prepare the election payload
+	sessionIDPtr := b.sessionID.Load().(*string)
+	if sessionIDPtr == nil {
+		return fmt.Errorf("session ID is nil")
+	}
 	electionPayload := &ElectionPayload{
 		Address:   service.Address,
 		Port:      service.Port,
-		SessionID: b.sessionID.Load().(string),
+		SessionID: *sessionIDPtr,
 	}
 
 	// Attempt to acquire leadership
-	if !b.leader.Load() && b.sessionID.Load() != nil {
+	if !b.leader.Load() && sessionIDPtr != nil {
 		_, _, err = b.attemptLeadershipAcquisition(electionPayload)
 		if err != nil {
 			return fmt.Errorf("failed to acquire lock: %s", err)
@@ -329,9 +350,14 @@ func (b *Ballot) attemptLeadershipAcquisition(electionPayload *ElectionPayload) 
 		return false, nil, fmt.Errorf("failed to marshal election payload: %s", err)
 	}
 
+	sessionIDPtr := b.sessionID.Load().(*string)
+	if sessionIDPtr == nil {
+		return false, nil, fmt.Errorf("session ID is nil")
+	}
+
 	content := &api.KVPair{
 		Key:     b.Key,
-		Session: b.sessionID.Load().(string),
+		Session: *sessionIDPtr,
 		Value:   payload,
 	}
 
@@ -352,13 +378,20 @@ func (b *Ballot) verifyAndUpdateLeadershipStatus() error {
 		return nil
 	}
 
-	isCurrentLeader := b.sessionID.Load() != nil && currentSessionData.SessionID == b.sessionID.Load().(string)
+	sessionIDPtr := b.sessionID.Load().(*string)
+	isCurrentLeader := sessionIDPtr != nil && currentSessionData.SessionID == *sessionIDPtr
 	return b.updateLeadershipStatus(isCurrentLeader)
 }
 
 // Run is the main loop for the leader election.
 func (b *Ballot) Run() (err error) {
-	electionTicker := time.NewTicker(5 * time.Second)
+	tickerInterval := b.TTL / 2
+	if tickerInterval < time.Second {
+		tickerInterval = time.Second
+	}
+	electionTicker := time.NewTicker(tickerInterval)
+	defer electionTicker.Stop()
+
 	for {
 		select {
 		case <-electionTicker.C:
@@ -367,7 +400,7 @@ func (b *Ballot) Run() (err error) {
 				log.WithFields(log.Fields{
 					"caller": "Run",
 					"error":  err,
-				}).Error("failed to run election")
+				}).Error("Failed to run election")
 			}
 		case <-b.ctx.Done():
 			return err
@@ -391,9 +424,20 @@ func (b *Ballot) updateLeadershipStatus(isLeader bool) error {
 
 // handleServiceCriticalState is called when the service is in a critical state.
 func (b *Ballot) handleServiceCriticalState() error {
-	state, _, err := b.client.Agent().AgentHealthServiceByName(b.Name)
+	healthChecks, _, err := b.client.Health().Checks(b.Name, nil)
 	if err != nil {
 		return fmt.Errorf("failed to get health checks: %s", err)
+	}
+
+	// Determine the aggregate status
+	state := "passing"
+	for _, check := range healthChecks {
+		if check.Status == "critical" {
+			state = "critical"
+			break
+		} else if check.Status == "warning" {
+			state = "warning"
+		}
 	}
 
 	if state == "critical" {
@@ -405,7 +449,7 @@ func (b *Ballot) handleServiceCriticalState() error {
 		if err != nil {
 			return fmt.Errorf("failed to update leadership status for service in critical state: %s", err)
 		}
-		return fmt.Errorf("service is in critical state, so I'm skipping the election")
+		return fmt.Errorf("service is in critical state, skipping the election")
 	}
 	return nil
 }
@@ -415,8 +459,9 @@ func (b *Ballot) session() (err error) {
 	if b.client == nil {
 		return fmt.Errorf("consul client is required")
 	}
-	if b.sessionID.Load() != nil {
-		currentSessionID := b.sessionID.Load().(string)
+	sessionIDPtr := b.sessionID.Load().(*string)
+	if sessionIDPtr != nil {
+		currentSessionID := *sessionIDPtr
 		sessionInfo, _, err := b.client.Session().Info(currentSessionID, nil)
 		if err != nil {
 			return err
@@ -425,20 +470,19 @@ func (b *Ballot) session() (err error) {
 			log.WithFields(log.Fields{
 				"caller":  "session",
 				"session": currentSessionID,
-			}).Trace("returning cached session")
+			}).Trace("Returning cached session")
 			return nil
 		}
 	}
 
 	log.WithFields(log.Fields{
 		"caller": "session",
-	}).Trace("creating session")
+	}).Trace("Creating new session")
 	sessionID, _, err := b.client.Session().Create(&api.SessionEntry{
-		Behavior:      "delete",
-		ServiceChecks: b.makeServiceCheck(b.ServiceChecks),
-		NodeChecks:    []string{"serfHealth"},
-		TTL:           b.TTL.String(),
-		LockDelay:     b.LockDelay,
+		Behavior:  "delete",
+		Checks:    append(b.ServiceChecks, "serfHealth"),
+		TTL:       b.TTL.String(),
+		LockDelay: b.LockDelay,
 	}, nil)
 	if err != nil {
 		return err
@@ -447,40 +491,41 @@ func (b *Ballot) session() (err error) {
 	log.WithFields(log.Fields{
 		"caller": "session",
 		"ID":     sessionID,
-	}).Trace("storing session ID")
-	b.sessionID.Store(sessionID)
+	}).Trace("Storing session ID")
+	b.sessionID.Store(&sessionID)
 
 	go func() {
-		err := b.client.Session().RenewPeriodic(b.LockDelay.String(), sessionID, nil, b.ctx.Done())
+		defer func() {
+			if r := recover(); r != nil {
+				log.WithFields(log.Fields{
+					"caller": "session",
+					"error":  r,
+				}).Error("Recovered from panic in session renewal")
+			}
+		}()
+
+		err := b.client.Session().RenewPeriodic(b.TTL.String(), sessionID, nil, b.ctx.Done())
 		if err != nil {
 			log.WithFields(log.Fields{
 				"caller": "session",
 				"error":  err,
-			}).Warning("failed to renew session")
+			}).Warning("Failed to renew session")
+			b.sessionID.Store((*string)(nil))
 		}
 	}()
 	return err
 }
 
-// makeServiceChecks creates a service check from a string.
-func (b *Ballot) makeServiceCheck(sc []string) (serviceChecks []api.ServiceCheck) {
-	log.WithFields(log.Fields{
-		"caller": "makeServiceCheck",
-	}).Trace("Creating service checks from string")
-	for _, check := range sc {
-		log.WithFields(log.Fields{
-			"caller":           "session",
-			"makeServiceCheck": check,
-		}).Trace("creating service check")
-		serviceChecks = append(serviceChecks, api.ServiceCheck{
-			ID: check,
-		})
-	}
-	return serviceChecks
-}
-
 func (b *Ballot) IsLeader() bool {
-	return b.leader.Load() && b.sessionID.Load() != nil
+	sessionIDValue := b.sessionID.Load()
+	if sessionIDValue == nil {
+		return false
+	}
+	sessionIDPtr, ok := sessionIDValue.(*string)
+	if !ok || sessionIDPtr == nil {
+		return false
+	}
+	return b.leader.Load()
 }
 
 func (b *Ballot) waitForNextValidSessionData(ctx context.Context) (data *ElectionPayload, err error) {
@@ -520,14 +565,15 @@ func (b *Ballot) getSessionData() (data *ElectionPayload, err error) {
 
 // releaseSession releases the session.
 func (b *Ballot) releaseSession() (err error) {
-	if b.sessionID.Load() == nil {
+	sessionIDPtr := b.sessionID.Load().(*string)
+	if sessionIDPtr == nil {
 		return nil
 	}
-	sessionID := b.sessionID.Load().(string)
+	sessionID := *sessionIDPtr
 	_, err = b.client.Session().Destroy(sessionID, nil)
 	if err != nil {
 		return err
 	}
-	b.sessionID = atomic.Value{}
+	b.sessionID.Store((*string)(nil))
 	return err
 }

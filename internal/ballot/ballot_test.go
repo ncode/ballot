@@ -92,8 +92,8 @@ type MockCommandExecutor struct {
 	mock.Mock
 }
 
-func (m *MockCommandExecutor) Command(name string, arg ...string) *exec.Cmd {
-	args := m.Called(name, arg)
+func (m *MockCommandExecutor) CommandContext(ctx context.Context, name string, arg ...string) *exec.Cmd {
+	args := m.Called(ctx, name, arg)
 	return args.Get(0).(*exec.Cmd)
 }
 
@@ -104,6 +104,7 @@ func TestRunCommand(t *testing.T) {
 	// Create a Ballot instance with the mock executor
 	b := &Ballot{
 		executor: mockExecutor,
+		ctx:      context.Background(),
 	}
 
 	// Define the command to run
@@ -117,7 +118,7 @@ func TestRunCommand(t *testing.T) {
 	// Set up the expectation
 	// Here, we're using a command that just outputs "mocked" when run
 	mockCmd := exec.Command("echo", "mocked")
-	mockExecutor.On("Command", "echo", []string{"hello"}).Return(mockCmd)
+	mockExecutor.On("CommandContext", b.ctx, "echo", []string{"hello"}).Return(mockCmd)
 
 	// Call the method under test
 	_, err := b.runCommand(command, payload)
@@ -129,56 +130,37 @@ func TestRunCommand(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestMakeServiceCheck(t *testing.T) {
-	b := &Ballot{}
-
-	t.Run("successful creation of service checks", func(t *testing.T) {
-		sc := []string{"check1", "check2", "check3"}
-
-		serviceChecks := b.makeServiceCheck(sc)
-
-		assert.Equal(t, len(sc), len(serviceChecks))
-		for i, check := range serviceChecks {
-			assert.Equal(t, sc[i], check.ID)
-		}
-	})
-
-	t.Run("handling of empty slice", func(t *testing.T) {
-		sc := []string{}
-
-		serviceChecks := b.makeServiceCheck(sc)
-
-		assert.Equal(t, 0, len(serviceChecks))
-	})
-}
-
 func TestIsLeader(t *testing.T) {
 	t.Run("returns true when the ballot is the leader", func(t *testing.T) {
 		b := &Ballot{}
 		b.leader.Store(true)
-		b.sessionID.Store("session")
+		sessionID := "session"
+		b.sessionID.Store(&sessionID)
 		assert.True(t, b.IsLeader())
 	})
 
 	t.Run("returns false when the ballot is not the leader", func(t *testing.T) {
 		b := &Ballot{}
+		b.leader.Store(false)
+		sessionID := "session"
+		b.sessionID.Store(&sessionID)
+		assert.False(t, b.IsLeader())
+	})
 
+	t.Run("returns false when the sessionID is nil", func(t *testing.T) {
+		b := &Ballot{}
+		b.leader.Store(true)
+		b.sessionID.Store((*string)(nil))
 		assert.False(t, b.IsLeader())
 	})
 
 	t.Run("returns false when the ballot hasn't stored a state yet", func(t *testing.T) {
 		b := &Ballot{}
-
-		assert.False(t, b.IsLeader())
-	})
-
-	t.Run("returns false when the ballot hasn't stored a session yet", func(t *testing.T) {
-		b := &Ballot{}
-
 		assert.False(t, b.IsLeader())
 	})
 }
 
+// MockConsulClient is a mock implementation of the ConsulClient interface
 type MockConsulClient struct {
 	mock.Mock
 }
@@ -201,4 +183,9 @@ func (m *MockConsulClient) KV() *api.KV {
 func (m *MockConsulClient) Session() *api.Session {
 	args := m.Called()
 	return args.Get(0).(*api.Session)
+}
+
+func (m *MockConsulClient) Health() *api.Health {
+	args := m.Called()
+	return args.Get(0).(*api.Health)
 }
