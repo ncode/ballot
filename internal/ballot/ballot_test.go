@@ -2,8 +2,10 @@ package ballot
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
+	"slices"
 	"testing"
 	"time"
 
@@ -451,6 +453,636 @@ func TestHandleServiceCriticalState(t *testing.T) {
 		err := b.handleServiceCriticalState()
 		assert.Error(t, err)
 		assert.ErrorContains(t, err, expectedErr.Error())
+	})
+}
+
+func TestUpdateServiceTags(t *testing.T) {
+	serviceID := "test_service_id"
+	primaryTag := "primary"
+	serviceName := "test_service"
+
+	// Base service data without the primary tag
+	baseService := &api.AgentService{
+		ID:      serviceID,
+		Service: serviceName,
+		Tags:    []string{"tag1", "tag2"},
+		Port:    8080,
+		Address: "127.0.0.1",
+	}
+
+	// Subtest: Add primary tag when becoming leader
+	t.Run("Add_primary_tag_when_becoming_leader", func(t *testing.T) {
+		// Create fresh mocks for this subtest
+		mockAgent := new(MockAgent)
+		mockCatalog := new(MockCatalog)
+		mockClient := &MockConsulClient{}
+		mockClient.On("Agent").Return(mockAgent)
+		mockClient.On("Catalog").Return(mockCatalog)
+
+		// Mock the Agent().Service call to return the base service without the primary tag
+		mockAgent.On("Service", serviceID, mock.Anything).Return(baseService, nil, nil)
+
+		// Mock the Catalog().Service call to return an empty slice (no existing primary tag)
+		mockCatalog.On("Service", serviceName, primaryTag, mock.AnythingOfType("*api.QueryOptions")).Return([]*api.CatalogService{}, nil, nil)
+
+		// Mock the Agent().ServiceRegister to accept any *api.AgentServiceRegistration and return nil error
+		mockAgent.On("ServiceRegister", mock.MatchedBy(func(reg *api.AgentServiceRegistration) bool {
+			// Ensure the primary tag is added
+			for _, tag := range reg.Tags {
+				if tag == primaryTag {
+					return true
+				}
+			}
+			return false
+		})).Return(nil)
+
+		// Initialize the Ballot instance with the mock client
+		b := &Ballot{
+			client:        mockClient,
+			ID:            serviceID,
+			Name:          serviceName,
+			PrimaryTag:    primaryTag,
+			ctx:           context.Background(),
+			ExecOnPromote: "",                 // Prevent running commands
+			ExecOnDemote:  "",                 // Prevent running commands
+			executor:      &commandExecutor{}, // Use the real executor or a mock if necessary
+		}
+
+		// Execute the method under test
+		err := b.updateServiceTags(true)
+		assert.NoError(t, err)
+
+		// Assert that ServiceRegister was called once with the primary tag added
+		mockAgent.AssertCalled(t, "ServiceRegister", mock.MatchedBy(func(reg *api.AgentServiceRegistration) bool {
+			return slices.Contains(reg.Tags, primaryTag)
+		}))
+	})
+
+	// Subtest: Remove primary tag when losing leadership
+	t.Run("Remove_primary_tag_when_losing_leadership", func(t *testing.T) {
+		// Clone the base service and add the primary tag
+		serviceWithPrimary := &api.AgentService{
+			ID:      serviceID,
+			Service: serviceName,
+			Tags:    append([]string{"tag1", "tag2"}, primaryTag),
+			Port:    8080,
+			Address: "127.0.0.1",
+		}
+
+		// Create fresh mocks for this subtest
+		mockAgent := new(MockAgent)
+		mockCatalog := new(MockCatalog)
+		mockClient := &MockConsulClient{}
+		mockClient.On("Agent").Return(mockAgent)
+		mockClient.On("Catalog").Return(mockCatalog)
+
+		// Mock the Agent().Service call to return the service with the primary tag
+		mockAgent.On("Service", serviceID, mock.Anything).Return(serviceWithPrimary, nil, nil)
+
+		// Mock the Catalog().Service call to return existing services with the primary tag
+		mockCatalog.On("Service", serviceName, primaryTag, mock.AnythingOfType("*api.QueryOptions")).Return([]*api.CatalogService{
+			{ServiceID: "other_service_id", ServiceName: serviceName, ServiceTags: []string{primaryTag}},
+		}, nil, nil)
+
+		// Mock the Agent().ServiceRegister to accept any *api.AgentServiceRegistration and return nil error
+		mockAgent.On("ServiceRegister", mock.MatchedBy(func(reg *api.AgentServiceRegistration) bool {
+			// Ensure the primary tag is removed
+			return !slices.Contains(reg.Tags, primaryTag)
+		})).Return(nil)
+
+		// Initialize the Ballot instance with the mock client
+		b := &Ballot{
+			client:        mockClient,
+			ID:            serviceID,
+			Name:          serviceName,
+			PrimaryTag:    primaryTag,
+			ctx:           context.Background(),
+			ExecOnPromote: "",                 // Prevent running commands
+			ExecOnDemote:  "",                 // Prevent running commands
+			executor:      &commandExecutor{}, // Use the real executor or a mock if necessary
+		}
+
+		// Execute the method under test
+		err := b.updateServiceTags(false)
+		assert.NoError(t, err)
+
+		// Assert that ServiceRegister was called once with the primary tag removed
+		mockAgent.AssertCalled(t, "ServiceRegister", mock.MatchedBy(func(reg *api.AgentServiceRegistration) bool {
+			return !slices.Contains(reg.Tags, primaryTag)
+		}))
+	})
+
+	// Subtest: No changes when tags are already correct
+	t.Run("No_changes_when_tags_are_already_correct", func(t *testing.T) {
+		// Clone the base service and add the primary tag
+		serviceWithPrimary := &api.AgentService{
+			ID:      serviceID,
+			Service: serviceName,
+			Tags:    append([]string{"tag1", "tag2"}, primaryTag),
+			Port:    8080,
+			Address: "127.0.0.1",
+		}
+
+		// Create fresh mocks for this subtest
+		mockAgent := new(MockAgent)
+		mockCatalog := new(MockCatalog)
+		mockClient := &MockConsulClient{}
+		mockClient.On("Agent").Return(mockAgent)
+		mockClient.On("Catalog").Return(mockCatalog)
+
+		// Mock the Agent().Service call to return the service with the primary tag
+		mockAgent.On("Service", serviceID, mock.Anything).Return(serviceWithPrimary, nil, nil)
+
+		// Mock the Catalog().Service call to return existing services without needing changes
+		mockCatalog.On("Service", serviceName, primaryTag, mock.AnythingOfType("*api.QueryOptions")).Return([]*api.CatalogService{}, nil, nil)
+
+		// No expectation for ServiceRegister since no changes should be made
+
+		// Initialize the Ballot instance with the mock client
+		b := &Ballot{
+			client:        mockClient,
+			ID:            serviceID,
+			Name:          serviceName,
+			PrimaryTag:    primaryTag,
+			ctx:           context.Background(),
+			ExecOnPromote: "",                 // Prevent running commands
+			ExecOnDemote:  "",                 // Prevent running commands
+			executor:      &commandExecutor{}, // Use the real executor or a mock if necessary
+		}
+
+		// Execute the method under test
+		err := b.updateServiceTags(true)
+		assert.NoError(t, err)
+
+		// Assert that ServiceRegister was NOT called
+		mockAgent.AssertNotCalled(t, "ServiceRegister")
+	})
+
+	// Subtest: Handle error when updating service registration fails
+	t.Run("Handle_error_when_updating_service_registration_fails", func(t *testing.T) {
+		// Create fresh mocks for this subtest
+		mockAgent := new(MockAgent)
+		mockCatalog := new(MockCatalog)
+		mockClient := &MockConsulClient{}
+		mockClient.On("Agent").Return(mockAgent)
+		mockClient.On("Catalog").Return(mockCatalog)
+
+		// Mock the Agent().Service call to return the base service without the primary tag
+		mockAgent.On("Service", serviceID, mock.Anything).Return(baseService, nil, nil)
+
+		// Mock the Catalog().Service call to return an empty slice (no existing primary tag)
+		mockCatalog.On("Service", serviceName, primaryTag, mock.AnythingOfType("*api.QueryOptions")).Return([]*api.CatalogService{}, nil, nil)
+
+		// Mock the Agent().ServiceRegister to return an error
+		expectedErr := fmt.Errorf("failed to register service")
+		mockAgent.On("ServiceRegister", mock.AnythingOfType("*api.AgentServiceRegistration")).Return(expectedErr)
+
+		// Initialize the Ballot instance with the mock client
+		b := &Ballot{
+			client:        mockClient,
+			ID:            serviceID,
+			Name:          serviceName,
+			PrimaryTag:    primaryTag,
+			ctx:           context.Background(),
+			ExecOnPromote: "",                 // Prevent running commands
+			ExecOnDemote:  "",                 // Prevent running commands
+			executor:      &commandExecutor{}, // Use the real executor or a mock if necessary
+		}
+
+		// Execute the method under test
+		err := b.updateServiceTags(true)
+		assert.Error(t, err)
+		assert.Equal(t, expectedErr, err)
+
+		// Assert that ServiceRegister was called once with the primary tag added
+		mockAgent.AssertCalled(t, "ServiceRegister", mock.MatchedBy(func(reg *api.AgentServiceRegistration) bool {
+			return slices.Contains(reg.Tags, primaryTag)
+		}))
+	})
+}
+
+func TestCleanup(t *testing.T) {
+	primaryTag := "primary"
+	serviceName := "test_service"
+
+	// Define the leader's election payload
+	leaderPayload := &ElectionPayload{
+		Address:   "127.0.0.1",
+		Port:      8080,
+		SessionID: "session_id",
+	}
+
+	// Define another service that needs cleanup (has the primary tag)
+	otherService := &api.CatalogService{
+		ServiceID:      "other_service_id",
+		ServiceName:    serviceName,
+		ServiceTags:    []string{primaryTag, "tag1"},
+		Node:           "node1",
+		ServiceAddress: "127.0.0.2", // Different from leader's address
+		ServicePort:    8081,        // Different from leader's port
+	}
+
+	// Subtest: Successful cleanup when leader
+	t.Run("Successful_cleanup_when_leader", func(t *testing.T) {
+		// Create fresh mocks for this subtest
+		mockCatalog := new(MockCatalog)
+		mockClient := &MockConsulClient{}
+		mockClient.On("Catalog").Return(mockCatalog)
+
+		// Mock the Catalog().Service call to return the other service with the primary tag
+		mockCatalog.On("Service", serviceName, "", mock.AnythingOfType("*api.QueryOptions")).Return([]*api.CatalogService{otherService}, nil, nil)
+
+		// Mock the Catalog().Register to accept *api.CatalogRegistration with primary tag removed and return nil error
+		mockCatalog.On("Register", mock.MatchedBy(func(reg *api.CatalogRegistration) bool {
+			if reg.Service == nil {
+				return false
+			}
+			return !slices.Contains(reg.Service.Tags, primaryTag)
+		}), mock.Anything).Return(&api.WriteMeta{}, nil)
+
+		// Initialize the Ballot instance with the mock client
+		b := &Ballot{
+			client:        mockClient,
+			Name:          serviceName,
+			PrimaryTag:    primaryTag,
+			ctx:           context.Background(),
+			ExecOnPromote: "", // Prevent running commands
+			ExecOnDemote:  "", // Prevent running commands
+			executor:      &commandExecutor{},
+		}
+
+		// Set the Ballot as leader and set sessionID
+		sessionID := leaderPayload.SessionID
+		b.leader.Store(true)
+		b.sessionID.Store(&sessionID)
+
+		// Execute the method under test
+		err := b.cleanup(leaderPayload)
+		assert.NoError(t, err)
+
+		// Assert that Catalog().Register was called once with the primary tag removed
+		mockCatalog.AssertCalled(t, "Register", mock.MatchedBy(func(reg *api.CatalogRegistration) bool {
+			if reg.Service == nil {
+				return false
+			}
+			return !slices.Contains(reg.Service.Tags, primaryTag)
+		}), mock.Anything)
+	})
+
+	// Subtest: No cleanup when not leader
+	t.Run("No_cleanup_when_not_leader", func(t *testing.T) {
+		// Create fresh mocks for this subtest
+		mockCatalog := new(MockCatalog)
+		mockClient := &MockConsulClient{}
+		mockClient.On("Catalog").Return(mockCatalog)
+
+		// Initialize the Ballot instance with the mock client
+		b := &Ballot{
+			client:        mockClient,
+			Name:          serviceName,
+			PrimaryTag:    primaryTag,
+			ctx:           context.Background(),
+			ExecOnPromote: "", // Prevent running commands
+			ExecOnDemote:  "", // Prevent running commands
+			executor:      &commandExecutor{},
+		}
+
+		// Set the Ballot as not leader
+		b.leader.Store(false)
+
+		// Execute the method under test
+		err := b.cleanup(leaderPayload)
+		assert.NoError(t, err)
+
+		// Assert that Catalog().Register was NOT called since not leader
+		mockCatalog.AssertNotCalled(t, "Register", mock.Anything, mock.Anything)
+	})
+
+	// Subtest: Handle error when updating catalog fails
+	t.Run("Handle_error_when_updating_catalog_fails", func(t *testing.T) {
+		// Create fresh mocks for this subtest
+		mockCatalog := new(MockCatalog)
+		mockClient := &MockConsulClient{}
+		mockClient.On("Catalog").Return(mockCatalog)
+
+		// Mock the Catalog().Service call to return the other service with the primary tag
+		mockCatalog.On("Service", serviceName, "", mock.AnythingOfType("*api.QueryOptions")).Return([]*api.CatalogService{otherService}, nil, nil)
+
+		// Mock the Catalog().Register to return an error
+		expectedErr := fmt.Errorf("failed to register catalog service")
+		mockCatalog.On("Register", mock.MatchedBy(func(reg *api.CatalogRegistration) bool {
+			if reg.Service == nil {
+				return false
+			}
+			return !slices.Contains(reg.Service.Tags, primaryTag)
+		}), mock.Anything).Return(nil, expectedErr)
+
+		// Initialize the Ballot instance with the mock client
+		b := &Ballot{
+			client:        mockClient,
+			Name:          serviceName,
+			PrimaryTag:    primaryTag,
+			ctx:           context.Background(),
+			ExecOnPromote: "", // Prevent running commands
+			ExecOnDemote:  "", // Prevent running commands
+			executor:      &commandExecutor{},
+		}
+
+		// Set the Ballot as leader and set sessionID
+		sessionID := leaderPayload.SessionID
+		b.leader.Store(true)
+		b.sessionID.Store(&sessionID)
+
+		// Execute the method under test
+		err := b.cleanup(leaderPayload)
+		assert.Error(t, err)
+		assert.Equal(t, expectedErr, err)
+
+		// Assert that Catalog().Register was called once with the primary tag removed
+		mockCatalog.AssertCalled(t, "Register", mock.MatchedBy(func(reg *api.CatalogRegistration) bool {
+			if reg.Service == nil {
+				return false
+			}
+			return !slices.Contains(reg.Service.Tags, primaryTag)
+		}), mock.Anything)
+	})
+}
+
+func TestAttemptLeadershipAcquisition(t *testing.T) {
+	sessionID := "session_id"
+	b := &Ballot{
+		Key: "election/test_service/leader",
+	}
+	b.sessionID.Store(&sessionID)
+
+	payload := &ElectionPayload{
+		Address:   "127.0.0.1",
+		Port:      8080,
+		SessionID: sessionID,
+	}
+
+	mockKV := new(MockKV)
+	mockKV.On("Acquire", mock.Anything, (*api.WriteOptions)(nil)).Return(true, &api.WriteMeta{}, nil)
+
+	mockClient := &MockConsulClient{}
+	mockClient.On("KV").Return(mockKV)
+
+	b.client = mockClient
+
+	t.Run("Successful acquisition", func(t *testing.T) {
+		acquired, _, err := b.attemptLeadershipAcquisition(payload)
+		assert.NoError(t, err)
+		assert.True(t, acquired)
+	})
+
+	t.Run("Failure due to nil session ID", func(t *testing.T) {
+		b.sessionID.Store((*string)(nil))
+		acquired, _, err := b.attemptLeadershipAcquisition(payload)
+		assert.Error(t, err)
+		assert.False(t, acquired)
+	})
+
+	t.Run("Failure due to KV Acquire error", func(t *testing.T) {
+		b.sessionID.Store(&sessionID)
+		expectedErr := fmt.Errorf("KV acquire error")
+		mockKV.On("Acquire", mock.Anything, (*api.WriteOptions)(nil)).Return(false, nil, expectedErr)
+
+		acquired, _, err := b.attemptLeadershipAcquisition(payload)
+		assert.Error(t, err)
+		assert.Equal(t, expectedErr, err)
+		assert.False(t, acquired)
+	})
+}
+
+func TestVerifyAndUpdateLeadershipStatus(t *testing.T) {
+	sessionID := "session_id"
+	b := &Ballot{}
+	b.sessionID.Store(&sessionID)
+
+	payload := &ElectionPayload{
+		SessionID: sessionID,
+	}
+
+	mockKV := new(MockKV)
+	data, _ := json.Marshal(payload)
+	mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(&api.KVPair{
+		Key:     b.Key,
+		Value:   data,
+		Session: sessionID,
+	}, nil, nil)
+
+	mockClient := &MockConsulClient{}
+	mockClient.On("KV").Return(mockKV)
+
+	b.client = mockClient
+
+	t.Run("Instance is leader", func(t *testing.T) {
+		err := b.verifyAndUpdateLeadershipStatus()
+		assert.NoError(t, err)
+		assert.True(t, b.IsLeader())
+	})
+
+	t.Run("Instance is not leader", func(t *testing.T) {
+		otherSessionID := "other_session_id"
+		payload.SessionID = otherSessionID
+		data, _ = json.Marshal(payload)
+		mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(&api.KVPair{
+			Key:     b.Key,
+			Value:   data,
+			Session: otherSessionID,
+		}, nil, nil)
+
+		err := b.verifyAndUpdateLeadershipStatus()
+		assert.NoError(t, err)
+		assert.False(t, b.IsLeader())
+	})
+
+	t.Run("Error getting session data", func(t *testing.T) {
+		expectedErr := fmt.Errorf("KV get error")
+		mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(nil, nil, expectedErr)
+
+		err := b.verifyAndUpdateLeadershipStatus()
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, expectedErr.Error())
+	})
+}
+
+func TestWaitForNextValidSessionData(t *testing.T) {
+	b := &Ballot{}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	payload := &ElectionPayload{
+		SessionID: "session_id",
+	}
+
+	mockKV := new(MockKV)
+	data, _ := json.Marshal(payload)
+	mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(&api.KVPair{
+		Key:   b.Key,
+		Value: data,
+	}, nil, nil)
+
+	mockClient := &MockConsulClient{}
+	mockClient.On("KV").Return(mockKV)
+
+	b.client = mockClient
+
+	t.Run("Successfully retrieves session data", func(t *testing.T) {
+		data, err := b.waitForNextValidSessionData(ctx)
+		assert.NoError(t, err)
+		assert.NotNil(t, data)
+		assert.Equal(t, payload.SessionID, data.SessionID)
+	})
+
+	t.Run("Handles context cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
+		defer cancel()
+		data, err := b.waitForNextValidSessionData(ctx)
+		assert.Error(t, err)
+		assert.Nil(t, data)
+	})
+
+	t.Run("Handles errors when getting session data", func(t *testing.T) {
+		expectedErr := fmt.Errorf("KV get error")
+		mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(nil, nil, expectedErr)
+
+		data, err := b.waitForNextValidSessionData(ctx)
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, expectedErr.Error())
+		assert.Nil(t, data)
+	})
+}
+
+func TestGetSessionData(t *testing.T) {
+	b := &Ballot{
+		Key: "election/test_service/leader",
+	}
+
+	mockKV := new(MockKV)
+	mockClient := &MockConsulClient{}
+	mockClient.On("KV").Return(mockKV)
+	b.client = mockClient
+
+	t.Run("Successfully retrieves session data", func(t *testing.T) {
+		payload := &ElectionPayload{
+			SessionID: "session_id",
+		}
+		data, _ := json.Marshal(payload)
+		mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(&api.KVPair{
+			Key:   b.Key,
+			Value: data,
+		}, nil, nil)
+
+		result, err := b.getSessionData()
+		assert.NoError(t, err)
+		assert.NotNil(t, result)
+		assert.Equal(t, payload.SessionID, result.SessionID)
+	})
+
+	t.Run("No data present", func(t *testing.T) {
+		mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(nil, nil, nil)
+
+		result, err := b.getSessionData()
+		assert.NoError(t, err)
+		assert.Nil(t, result)
+	})
+
+	t.Run("Error from KV store", func(t *testing.T) {
+		expectedErr := fmt.Errorf("KV get error")
+		mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(nil, nil, expectedErr)
+
+		result, err := b.getSessionData()
+		assert.Error(t, err)
+		assert.Nil(t, result)
+	})
+
+	t.Run("JSON unmarshal error", func(t *testing.T) {
+		mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(&api.KVPair{
+			Key:   b.Key,
+			Value: []byte("invalid json"),
+		}, nil, nil)
+
+		result, err := b.getSessionData()
+		assert.Error(t, err)
+		assert.Nil(t, result)
+	})
+}
+
+func TestElection(t *testing.T) {
+	b := &Ballot{
+		ID:         "test_service_id",
+		Name:       "test_service",
+		Key:        "election/test_service/leader",
+		PrimaryTag: "primary",
+		TTL:        10 * time.Second,
+		ctx:        context.Background(),
+	}
+
+	// Mock health checks
+	mockHealth := new(MockHealth)
+	mockHealth.On("Checks", b.Name, (*api.QueryOptions)(nil)).Return([]*api.HealthCheck{
+		{Status: "passing"},
+	}, nil, nil)
+
+	// Mock session
+	sessionID := "session_id"
+	mockSession := new(MockSession)
+	mockSession.On("Create", mock.Anything, (*api.WriteOptions)(nil)).Return(sessionID, nil, nil)
+	mockSession.On("RenewPeriodic", mock.Anything, sessionID, (*api.WriteOptions)(nil), mock.Anything).Return(nil)
+	mockSession.On("Info", sessionID, (*api.QueryOptions)(nil)).Return(&api.SessionEntry{ID: sessionID}, nil, nil)
+
+	// Mock KV
+	mockKV := new(MockKV)
+	mockKV.On("Acquire", mock.Anything, (*api.WriteOptions)(nil)).Return(true, nil, nil)
+
+	// Mock Agent
+	service := &api.AgentService{
+		ID:      b.ID,
+		Service: b.Name,
+		Address: "127.0.0.1",
+		Port:    8080,
+	}
+	mockAgent := new(MockAgent)
+	mockAgent.On("Service", b.ID, (*api.QueryOptions)(nil)).Return(service, nil, nil)
+
+	// Mock Catalog
+	mockCatalog := new(MockCatalog)
+	mockCatalog.On("Service", b.Name, b.PrimaryTag, (*api.QueryOptions)(nil)).Return([]*api.CatalogService{}, nil, nil)
+
+	// Set up the mock client
+	mockClient := &MockConsulClient{}
+	mockClient.On("Health").Return(mockHealth)
+	mockClient.On("Session").Return(mockSession)
+	mockClient.On("KV").Return(mockKV)
+	mockClient.On("Agent").Return(mockAgent)
+	mockClient.On("Catalog").Return(mockCatalog)
+
+	b.client = mockClient
+
+	t.Run("Successful election", func(t *testing.T) {
+		err := b.election()
+		assert.NoError(t, err)
+		assert.True(t, b.IsLeader())
+	})
+
+	t.Run("Service in critical state", func(t *testing.T) {
+		mockHealth.On("Checks", b.Name, (*api.QueryOptions)(nil)).Return([]*api.HealthCheck{
+			{Status: "critical"},
+		}, nil, nil)
+
+		err := b.election()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "service is in critical state")
+	})
+
+	t.Run("Session creation fails", func(t *testing.T) {
+		expectedErr := fmt.Errorf("session creation error")
+		mockSession.On("Create", mock.Anything, (*api.WriteOptions)(nil)).Return("", nil, expectedErr)
+
+		err := b.election()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), expectedErr.Error())
 	})
 }
 
