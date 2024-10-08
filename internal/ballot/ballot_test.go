@@ -1432,17 +1432,19 @@ func TestSessionWrapper_RenewPeriodic(t *testing.T) {
 	sessionID := "session_id"
 	writeOptions := &api.WriteOptions{}
 	doneCh := make(chan struct{})
+	// Convert to receive-only channel
+	var receiveOnlyDoneCh <-chan struct{} = doneCh
 
 	expectedErr := errors.New("renew error")
 
-	mockSession.On("RenewPeriodic", initialTTL, sessionID, writeOptions, doneCh).Return(expectedErr)
+	mockSession.On("RenewPeriodic", initialTTL, sessionID, writeOptions, receiveOnlyDoneCh).Return(expectedErr)
 
 	// Act
-	err := sessionWrapper.RenewPeriodic(initialTTL, sessionID, writeOptions, doneCh)
+	err := sessionWrapper.RenewPeriodic(initialTTL, sessionID, writeOptions, receiveOnlyDoneCh)
 
 	// Assert
 	assert.Equal(t, expectedErr, err)
-	mockSession.AssertCalled(t, "RenewPeriodic", initialTTL, sessionID, writeOptions, doneCh)
+	mockSession.AssertCalled(t, "RenewPeriodic", initialTTL, sessionID, writeOptions, receiveOnlyDoneCh)
 }
 
 func TestKVWrapper_Get(t *testing.T) {
@@ -1616,8 +1618,8 @@ func (m *MockSession) Info(sessionID string, q *api.QueryOptions) (*api.SessionE
 	return args.Get(0).(*api.SessionEntry), args.Get(1).(*api.QueryMeta), args.Error(2)
 }
 
-func (m *MockSession) RenewPeriodic(initialTTL string, sessionID string, q *api.WriteOptions, doneCh <-chan struct{}) error {
-	args := m.Called(initialTTL, sessionID, q, doneCh)
+func (m *MockSession) RenewPeriodic(initialTTL string, id string, q *api.WriteOptions, doneCh <-chan struct{}) error {
+	args := m.Called(initialTTL, id, q, doneCh)
 	return args.Error(0)
 }
 
