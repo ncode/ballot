@@ -1038,49 +1038,79 @@ func TestVerifyAndUpdateLeadershipStatus(t *testing.T) {
 }
 
 func TestWaitForNextValidSessionData(t *testing.T) {
-	b := &Ballot{}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	payload := &ElectionPayload{
-		SessionID: "session_id",
-	}
-
-	mockKV := new(MockKV)
-	data, _ := json.Marshal(payload)
-	mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(&api.KVPair{
-		Key:   b.Key,
-		Value: data,
-	}, nil, nil)
-
-	mockClient := &MockConsulClient{}
-	mockClient.On("KV").Return(mockKV)
-
-	b.client = mockClient
-
 	t.Run("Successfully retrieves session data", func(t *testing.T) {
-		data, err := b.waitForNextValidSessionData(ctx)
+		b := &Ballot{
+			Key: "election/test_service/leader",
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		payload := &ElectionPayload{
+			SessionID: "session_id",
+		}
+
+		mockKV := new(MockKV)
+		data, _ := json.Marshal(payload)
+		mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(&api.KVPair{
+			Key:   b.Key,
+			Value: data,
+		}, nil, nil)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("KV").Return(mockKV)
+
+		b.client = mockClient
+
+		// Correctly assign to payload of type *ElectionPayload
+		resultPayload, err := b.waitForNextValidSessionData(ctx)
 		assert.NoError(t, err)
-		assert.NotNil(t, data)
-		assert.Equal(t, payload.SessionID, data.SessionID)
+		assert.NotNil(t, resultPayload)
+		assert.Equal(t, payload.SessionID, resultPayload.SessionID)
 	})
 
 	t.Run("Handles context cancellation", func(t *testing.T) {
+		b := &Ballot{
+			Key: "election/test_service/leader",
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
 		defer cancel()
-		data, err := b.waitForNextValidSessionData(ctx)
+
+		mockKV := new(MockKV)
+		mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(nil, nil, nil)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("KV").Return(mockKV)
+
+		b.client = mockClient
+
+		// Correctly assign to payload of type *ElectionPayload
+		resultPayload, err := b.waitForNextValidSessionData(ctx)
 		assert.Error(t, err)
-		assert.Nil(t, data)
+		assert.Equal(t, context.DeadlineExceeded, err)
+		assert.Nil(t, resultPayload)
 	})
 
 	t.Run("Handles errors when getting session data", func(t *testing.T) {
+		b := &Ballot{
+			Key: "election/test_service/leader",
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
 		expectedErr := fmt.Errorf("KV get error")
+		mockKV := new(MockKV)
 		mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(nil, nil, expectedErr)
 
-		data, err := b.waitForNextValidSessionData(ctx)
+		mockClient := &MockConsulClient{}
+		mockClient.On("KV").Return(mockKV)
+
+		b.client = mockClient
+
+		// Correctly assign to payload of type *ElectionPayload
+		resultPayload, err := b.waitForNextValidSessionData(ctx)
 		assert.Error(t, err)
 		assert.ErrorContains(t, err, expectedErr.Error())
-		assert.Nil(t, data)
+		assert.Nil(t, resultPayload)
 	})
 }
 
