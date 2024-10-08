@@ -50,7 +50,7 @@ type AgentInterface interface {
 }
 
 type AgentWrapper struct {
-	agent *api.Agent
+	agent AgentInterface
 }
 
 func (a *AgentWrapper) ServiceRegister(service *api.AgentServiceRegistration) error {
@@ -68,7 +68,7 @@ type CatalogInterface interface {
 }
 
 type CatalogWrapper struct {
-	catalog *api.Catalog
+	catalog CatalogInterface
 }
 
 func (c *CatalogWrapper) Service(serviceName, tag string, q *api.QueryOptions) ([]*api.CatalogService, *api.QueryMeta, error) {
@@ -101,7 +101,7 @@ type SessionInterface interface {
 }
 
 type SessionWrapper struct {
-	session *api.Session
+	session SessionInterface
 }
 
 func (s *SessionWrapper) Create(se *api.SessionEntry, q *api.WriteOptions) (string, *api.WriteMeta, error) {
@@ -128,7 +128,7 @@ type KVInterface interface {
 }
 
 type KVWrapper struct {
-	kv *api.KV
+	kv KVInterface
 }
 
 func (k *KVWrapper) Get(key string, q *api.QueryOptions) (*api.KVPair, *api.QueryMeta, error) {

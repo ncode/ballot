@@ -3,6 +3,7 @@ package ballot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"slices"
@@ -1303,6 +1304,193 @@ func TestElection(t *testing.T) {
 		// Verify that b.IsLeader() returns true
 		assert.True(t, b.IsLeader(), "Expected b.IsLeader() to return true after successful election")
 	})
+}
+
+func TestAgentWrapper_ServiceRegister(t *testing.T) {
+	// Arrange
+	mockAgent := new(MockAgent)
+	agentWrapper := &AgentWrapper{agent: mockAgent}
+
+	serviceReg := &api.AgentServiceRegistration{
+		Name: "test_service",
+	}
+
+	expectedErr := errors.New("registration error")
+	mockAgent.On("ServiceRegister", serviceReg).Return(expectedErr)
+
+	// Act
+	err := agentWrapper.ServiceRegister(serviceReg)
+
+	// Assert
+	assert.Equal(t, expectedErr, err)
+	mockAgent.AssertCalled(t, "ServiceRegister", serviceReg)
+}
+
+func TestAgentWrapper_Service(t *testing.T) {
+	// Arrange
+	mockAgent := new(MockAgent)
+	agentWrapper := &AgentWrapper{agent: mockAgent}
+
+	serviceID := "test_service_id"
+	queryOptions := &api.QueryOptions{}
+
+	expectedService := &api.AgentService{ID: serviceID}
+	expectedMeta := &api.QueryMeta{}
+	expectedErr := errors.New("service error")
+
+	mockAgent.On("Service", serviceID, queryOptions).Return(expectedService, expectedMeta, expectedErr)
+
+	// Act
+	service, meta, err := agentWrapper.Service(serviceID, queryOptions)
+
+	// Assert
+	assert.Equal(t, expectedService, service)
+	assert.Equal(t, expectedMeta, meta)
+	assert.Equal(t, expectedErr, err)
+	mockAgent.AssertCalled(t, "Service", serviceID, queryOptions)
+}
+
+func TestCatalogWrapper_Service(t *testing.T) {
+	// Arrange
+	mockCatalog := new(MockCatalog)
+	catalogWrapper := &CatalogWrapper{catalog: mockCatalog}
+
+	serviceName := "test_service"
+	tag := "test_tag"
+	queryOptions := &api.QueryOptions{}
+
+	expectedServices := []*api.CatalogService{
+		{ServiceName: serviceName},
+	}
+	expectedMeta := &api.QueryMeta{}
+	expectedErr := errors.New("catalog service error")
+
+	mockCatalog.On("Service", serviceName, tag, queryOptions).Return(expectedServices, expectedMeta, expectedErr)
+
+	// Act
+	services, meta, err := catalogWrapper.Service(serviceName, tag, queryOptions)
+
+	// Assert
+	assert.Equal(t, expectedServices, services)
+	assert.Equal(t, expectedMeta, meta)
+	assert.Equal(t, expectedErr, err)
+	mockCatalog.AssertCalled(t, "Service", serviceName, tag, queryOptions)
+}
+
+func TestCatalogWrapper_Register(t *testing.T) {
+	// Arrange
+	mockCatalog := new(MockCatalog)
+	catalogWrapper := &CatalogWrapper{catalog: mockCatalog}
+
+	registration := &api.CatalogRegistration{}
+	writeOptions := &api.WriteOptions{}
+
+	expectedMeta := &api.WriteMeta{}
+	expectedErr := errors.New("register error")
+
+	mockCatalog.On("Register", registration, writeOptions).Return(expectedMeta, expectedErr)
+
+	// Act
+	meta, err := catalogWrapper.Register(registration, writeOptions)
+
+	// Assert
+	assert.Equal(t, expectedMeta, meta)
+	assert.Equal(t, expectedErr, err)
+	mockCatalog.AssertCalled(t, "Register", registration, writeOptions)
+}
+
+func TestSessionWrapper_Create(t *testing.T) {
+	// Arrange
+	mockSession := new(MockSession)
+	sessionWrapper := &SessionWrapper{session: mockSession}
+
+	sessionEntry := &api.SessionEntry{}
+	writeOptions := &api.WriteOptions{}
+
+	expectedID := "session_id"
+	expectedMeta := &api.WriteMeta{}
+	expectedErr := errors.New("session create error")
+
+	mockSession.On("Create", sessionEntry, writeOptions).Return(expectedID, expectedMeta, expectedErr)
+
+	// Act
+	sessionID, meta, err := sessionWrapper.Create(sessionEntry, writeOptions)
+
+	// Assert
+	assert.Equal(t, expectedID, sessionID)
+	assert.Equal(t, expectedMeta, meta)
+	assert.Equal(t, expectedErr, err)
+	mockSession.AssertCalled(t, "Create", sessionEntry, writeOptions)
+}
+
+func TestSessionWrapper_RenewPeriodic(t *testing.T) {
+	// Arrange
+	mockSession := new(MockSession)
+	sessionWrapper := &SessionWrapper{session: mockSession}
+
+	initialTTL := "15s"
+	sessionID := "session_id"
+	writeOptions := &api.WriteOptions{}
+	doneCh := make(chan struct{})
+
+	expectedErr := errors.New("renew error")
+
+	mockSession.On("RenewPeriodic", initialTTL, sessionID, writeOptions, doneCh).Return(expectedErr)
+
+	// Act
+	err := sessionWrapper.RenewPeriodic(initialTTL, sessionID, writeOptions, doneCh)
+
+	// Assert
+	assert.Equal(t, expectedErr, err)
+	mockSession.AssertCalled(t, "RenewPeriodic", initialTTL, sessionID, writeOptions, doneCh)
+}
+
+func TestKVWrapper_Get(t *testing.T) {
+	// Arrange
+	mockKV := new(MockKV)
+	kvWrapper := &KVWrapper{kv: mockKV}
+
+	key := "test_key"
+	queryOptions := &api.QueryOptions{}
+
+	expectedKVPair := &api.KVPair{Key: key}
+	expectedMeta := &api.QueryMeta{}
+	expectedErr := errors.New("get error")
+
+	mockKV.On("Get", key, queryOptions).Return(expectedKVPair, expectedMeta, expectedErr)
+
+	// Act
+	kvPair, meta, err := kvWrapper.Get(key, queryOptions)
+
+	// Assert
+	assert.Equal(t, expectedKVPair, kvPair)
+	assert.Equal(t, expectedMeta, meta)
+	assert.Equal(t, expectedErr, err)
+	mockKV.AssertCalled(t, "Get", key, queryOptions)
+}
+
+func TestKVWrapper_Acquire(t *testing.T) {
+	// Arrange
+	mockKV := new(MockKV)
+	kvWrapper := &KVWrapper{kv: mockKV}
+
+	kvPair := &api.KVPair{Key: "test_key"}
+	writeOptions := &api.WriteOptions{}
+
+	expectedSuccess := true
+	expectedMeta := &api.WriteMeta{}
+	expectedErr := errors.New("acquire error")
+
+	mockKV.On("Acquire", kvPair, writeOptions).Return(expectedSuccess, expectedMeta, expectedErr)
+
+	// Act
+	success, meta, err := kvWrapper.Acquire(kvPair, writeOptions)
+
+	// Assert
+	assert.Equal(t, expectedSuccess, success)
+	assert.Equal(t, expectedMeta, meta)
+	assert.Equal(t, expectedErr, err)
+	mockKV.AssertCalled(t, "Acquire", kvPair, writeOptions)
 }
 
 // MockConsulClient is a mock implementation of the api.Client interface
