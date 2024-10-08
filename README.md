@@ -5,47 +5,52 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![codecov](https://codecov.io/gh/ncode/ballot/graph/badge.svg?token=GVADXAIACR)](https://codecov.io/gh/ncode/ballot)
 
-Consul based leader election with tagging support and hooks
+Consul-based leader election tool with tagging support and hooks for automated tasks on leadership changes.
 
 ### What is it?
 
-Consul lacks a built-in feature for leader election among registered services. This tool is designed to fill that gap. It functions by designating a leader among multiple services, marking the chosen leader with a specified tag. Additionally, it allows for the execution of a script whenever a leader election occurs.
+Ballot fills a gap in Consul's functionality by providing a built-in feature for leader election among registered services. It designates a leader among multiple services, marks the chosen leader with a specified tag, and allows for the execution of a script whenever a leader election occurs.
 
 ### How does it work?
 
-Ballot uses Consul's session API to create a session for each service. The session is then used to create a lock on a key. The service that successfully creates the lock is elected as the leader. The leader is then tagged with a specified tag. The leader election is monitored and the leader is updated if the current leader is no longer healthy.
-More info about the sessions here [https://developer.hashicorp.com/consul/tutorials/developer-configuration/application-leader-elections](https://developer.hashicorp.com/consul/tutorials/developer-configuration/application-leader-elections).
+Ballot leverages Consul's session and key-value (KV) store APIs to perform leader election:
 
-### How do I use it?
+1. Session Creation: Each service instance creates a Consul session.
+2. Lock Acquisition: Instances attempt to acquire a lock on a predefined Consul KV key using their session.
+3. Leader Election: The instance that successfully acquires the lock is elected as the leader.
+4. Tagging the Leader: The leader is tagged with a specified tag (e.g., primary) in the Consul catalog.
+5. Health Checks: The leader's health is continuously monitored. If the leader becomes unhealthy, the lock is released, and a new election occurs.
+6. Hooks Execution: Custom scripts or commands can be executed when a service is promoted to leader or demoted.
+More information about Consul sessions and leader elections can be found in [https://developer.hashicorp.com/consul/tutorials/developer-configuration/application-leader-elections](https://developer.hashicorp.com/consul/tutorials/developer-configuration/application-leader-elections).
+
+### How do try it?
 
 1. Install Ballot
 ```bash
 $ git clone https://github.com/ncode/ballot
-$ go build
+$ cd configs/development
 ```
-2. Run consul in dev mode and register two services
+2. Run the development setup
 ```bash
-$ consul agent -dev -enable-script-checks=true &
-$ curl --request PUT --data @examples/consul/my-service1.json http://127.0.0.1:8500/v1/agent/service/register\?replace-existing-checks\=true
-$ curl --request PUT --data @examples/consul/my-service2.json http://127.0.0.1:8500/v1/agent/service/register\?replace-existing-checks\=true
+$ make &
 ```
-3. Run one instance of Ballot for each service
+3. Open consul ui http://127.0.0.1:8500/ui/dc1/services/my-service/instances
+4. Play with the health checks and see the election happening and moving
 ```bash
-$ ./ballot run --config $PWD/examples/config/ballot1.yaml &
-$ ./ballot run --config $PWD/examples/config/ballot2.yaml &
-```
-4. Open consul ui http://127.0.0.1:8500/ui/dc1/services/my_service/instances
-5. Play with the health checks and see the election happening and moving
-```bash
-$ cp /bin/ls /tmp/lalala1
-$ cp /bin/ls /tmp/lalala2
-$ sleep 30
-$ rm /tmp/lalala1
+$ find consul/state
+consul/state
+consul/state/ready1
+consul/state/ready3
+consul/state/ready2
+$ rm consul/state/ready1
 $ sleep 10
-$ cp /bin/ls /tmp/lalala1
-$ rm /tmp/lalala2
+$ touch consul/state/ready1
+$ rm consul/state/ready2
 $ sleep 10
-$ cp /bin/ls /tmp/lalala2
+$ touch consul/state/ready2
+$ rm consul/state/ready3
+$ sleep 10
+$ touch consul/state/ready3
 ```
 
 ### Environment variables
@@ -82,9 +87,20 @@ election:
       lockDelay: 5s                         # Lock delay for the session
 ```
 
-### TODO:
+### Development and examples
+
+Examples of configuration files and service definitions can be found inside config/development
+
+
+### Contributing
+
+Contributions are welcome! Please open an issue or submit a pull request for any improvements, bug fixes, or new features.
+
+### TODO
 
 - Write more tests
-- Add more examples
 - Allow to pre-define the preferred leader
-- Update the docks with the lock delays and timeouts
+
+### License
+
+This project is licensed under the Apache License 2.0. See the LICENSE file for details.
