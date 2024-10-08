@@ -1,16 +1,16 @@
 consul:
   token:
-  address: http://consul-agent-1:8500
+  address: http://consul-agent-3:8500
 election:
   enabled:
     - my-service
   services:
-    my_service:
-      id: my-service1
+    my-service:
+      id: my-service3
       key: service/my-service
       token:
       serviceChecks:
-        - service:election1
+        - service:election3
       primaryTag: primary
       execOnPromote: '/bin/echo I am da boss'
       execOnDemote: '/bin/echo I am no longer da boss'

@@ -1,46 +1,41 @@
-version: '3'
-
 services:
   consul-server:
     image: hashicorp/consul:latest
     container_name: consul-server
-    command: "agent -dev -bind=0.0.0.0"
+    command: "agent -dev -bind=0.0.0.0 -client=0.0.0.0"
     ports:
       - "8500:8500"
       - "8600:8600/udp"
-    networks:
-      - consul-network
 
   consul-agent-1:
     image: hashicorp/consul:latest
     container_name: consul-agent-1
-    command: "agent -dev -join=consul-server -bind=0.0.0.0 -config-dir=/etc/consul"
+    command: "agent -dev -join=consul-server -enable-script-checks -bind=0.0.0.0 -client=0.0.0.0 -config-dir=/etc/consul"
     depends_on:
       - consul-server
     volumes:
-      - ./consul:/etc/consul:ro
-    networks:
-      - consul-network
+      - ./consul/consul-agent-1:/etc/consul:ro
+      - ./consul/state:/state:ro
 
   consul-agent-2:
     image: hashicorp/consul:latest
     container_name: consul-agent-2
-    command: "agent -dev -join=consul-server -bind=0.0.0.0 -config-dir=/etc/consul"
+    command: "agent -dev -join=consul-server -enable-script-checks -bind=0.0.0.0 -client=0.0.0.0 -config-dir=/etc/consul"
+    depends_on:
+      - consul-server
     volumes:
-      - ./consul:/etc/consul:ro
-    networks:
-      - consul-network
+      - ./consul/consul-agent-2:/etc/consul:ro
+      - ./consul/state:/state:ro
 
   consul-agent-3:
     image: hashicorp/consul:latest
     container_name: consul-agent-3
-    command: "agent -dev -join=consul-server -bind=0.0.0.0 -config-dir=/etc/consul"
+    command: "agent -dev -join=consul-server -enable-script-checks -bind=0.0.0.0 -client=0.0.0.0 -config-dir=/etc/consul"
     depends_on:
       - consul-server
     volumes:
-      - ./consul:/etc/consul:ro
-    networks:
-      - consul-network
+      - ./consul/consul-agent-3:/etc/consul:ro
+      - ./consul/state:/state:ro
 
   ballot-1:
     image: ncode/ballot:dev
@@ -52,8 +47,6 @@ services:
       - consul-agent-3
     volumes:
       - ./ballot-1:/etc/ballot:ro
-    networks:
-      - consul-network
 
   ballot-2:
     image: ncode/ballot:dev
@@ -65,8 +58,6 @@ services:
       - consul-agent-3
     volumes:
       - ./ballot-2:/etc/ballot:ro
-    networks:
-      - consul-network
 
   ballot-3:
     image: ncode/ballot:dev
@@ -78,10 +69,4 @@ services:
       - consul-agent-3
     volumes:
       - ./ballot-3:/etc/ballot:ro
-    networks:
-      - consul-network
-
-networks:
-  consul-network:
-    driver: bridge
 

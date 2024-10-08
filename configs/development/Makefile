@@ -7,9 +7,10 @@ build:
 
 docker-build:
 	docker build -t ncode/ballot:dev .
+	rm ballot
 
 up:
 	docker compose up
 
-dowm:
-	docker compose dowm
+down:
+	docker compose down
