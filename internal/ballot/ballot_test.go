@@ -959,7 +959,82 @@ func TestVerifyAndUpdateLeadershipStatus(t *testing.T) {
 		mockAgent.AssertCalled(t, "ServiceRegister", mock.AnythingOfType("*api.AgentServiceRegistration"))
 	})
 
-	// Update other subtests similarly if they result in calls to ServiceRegister
+	t.Run("Instance is not leader", func(t *testing.T) {
+		sessionID := "session_id"
+		b := &Ballot{
+			ID:         "test_service_id",
+			Name:       "test_service",
+			Key:        "election/test_service/leader",
+			PrimaryTag: "primary",
+		}
+		b.sessionID.Store(&sessionID)
+
+		otherSessionID := "other_session_id"
+		payload := &ElectionPayload{
+			SessionID: otherSessionID,
+		}
+
+		// Mock KV
+		mockKV := new(MockKV)
+		data, _ := json.Marshal(payload)
+		mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(&api.KVPair{
+			Key:     b.Key,
+			Value:   data,
+			Session: otherSessionID,
+		}, nil, nil)
+
+		// Mock Agent
+		mockAgent := new(MockAgent)
+		service := &api.AgentService{
+			ID:      b.ID,
+			Service: b.Name,
+			Address: "127.0.0.1",
+			Port:    8080,
+		}
+		mockAgent.On("Service", b.ID, mock.Anything).Return(service, nil, nil)
+
+		// Mock Catalog
+		mockCatalog := new(MockCatalog)
+		mockCatalog.On("Service", b.Name, b.PrimaryTag, mock.AnythingOfType("*api.QueryOptions")).Return([]*api.CatalogService{}, nil, nil)
+
+		// Mock Client
+		mockClient := &MockConsulClient{}
+		mockClient.On("KV").Return(mockKV)
+		mockClient.On("Agent").Return(mockAgent)
+		mockClient.On("Catalog").Return(mockCatalog)
+
+		b.client = mockClient
+
+		err := b.verifyAndUpdateLeadershipStatus()
+		assert.NoError(t, err)
+		assert.False(t, b.IsLeader())
+	})
+
+	t.Run("Error getting session data", func(t *testing.T) {
+		sessionID := "session_id"
+		b := &Ballot{
+			ID:         "test_service_id",
+			Name:       "test_service",
+			Key:        "election/test_service/leader",
+			PrimaryTag: "primary",
+		}
+		b.sessionID.Store(&sessionID)
+
+		// Mock KV
+		expectedErr := fmt.Errorf("KV get error")
+		mockKV := new(MockKV)
+		mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(nil, nil, expectedErr)
+
+		// Mock Client
+		mockClient := &MockConsulClient{}
+		mockClient.On("KV").Return(mockKV)
+
+		b.client = mockClient
+
+		err := b.verifyAndUpdateLeadershipStatus()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), expectedErr.Error())
+	})
 }
 
 func TestWaitForNextValidSessionData(t *testing.T) {
