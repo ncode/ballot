@@ -1115,16 +1115,16 @@ func TestWaitForNextValidSessionData(t *testing.T) {
 }
 
 func TestGetSessionData(t *testing.T) {
-	b := &Ballot{
-		Key: "election/test_service/leader",
-	}
-
-	mockKV := new(MockKV)
-	mockClient := &MockConsulClient{}
-	mockClient.On("KV").Return(mockKV)
-	b.client = mockClient
-
 	t.Run("Successfully retrieves session data", func(t *testing.T) {
+		b := &Ballot{
+			Key: "election/test_service/leader",
+		}
+
+		mockKV := new(MockKV)
+		mockClient := &MockConsulClient{}
+		mockClient.On("KV").Return(mockKV)
+		b.client = mockClient
+
 		payload := &ElectionPayload{
 			SessionID: "session_id",
 		}
@@ -1141,6 +1141,15 @@ func TestGetSessionData(t *testing.T) {
 	})
 
 	t.Run("No data present", func(t *testing.T) {
+		b := &Ballot{
+			Key: "election/test_service/leader",
+		}
+
+		mockKV := new(MockKV)
+		mockClient := &MockConsulClient{}
+		mockClient.On("KV").Return(mockKV)
+		b.client = mockClient
+
 		mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(nil, nil, nil)
 
 		result, err := b.getSessionData()
@@ -1149,15 +1158,34 @@ func TestGetSessionData(t *testing.T) {
 	})
 
 	t.Run("Error from KV store", func(t *testing.T) {
+		b := &Ballot{
+			Key: "election/test_service/leader",
+		}
+
+		mockKV := new(MockKV)
+		mockClient := &MockConsulClient{}
+		mockClient.On("KV").Return(mockKV)
+		b.client = mockClient
+
 		expectedErr := fmt.Errorf("KV get error")
 		mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(nil, nil, expectedErr)
 
 		result, err := b.getSessionData()
 		assert.Error(t, err)
+		assert.Equal(t, expectedErr, err)
 		assert.Nil(t, result)
 	})
 
 	t.Run("JSON unmarshal error", func(t *testing.T) {
+		b := &Ballot{
+			Key: "election/test_service/leader",
+		}
+
+		mockKV := new(MockKV)
+		mockClient := &MockConsulClient{}
+		mockClient.On("KV").Return(mockKV)
+		b.client = mockClient
+
 		mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(&api.KVPair{
 			Key:   b.Key,
 			Value: []byte("invalid json"),
