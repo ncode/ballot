@@ -18,6 +18,9 @@ package cmd
 import (
 	"context"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 
 	"github.com/ncode/ballot/internal/ballot"
 	log "github.com/sirupsen/logrus"
@@ -30,25 +33,39 @@ var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run the ballot and starts all the defined elections",
 	Run: func(cmd *cobra.Command, args []string) {
-		ctx := context.Background()
-		for _, name := range viper.GetStringSlice("election.enabled") {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+
+		var wg sync.WaitGroup
+		enabledServices := viper.GetStringSlice("election.enabled")
+
+		for _, name := range enabledServices {
 			b, err := ballot.New(ctx, name)
 			if err != nil {
 				log.WithFields(log.Fields{
-					"caller": "run",
-					"step":   "New",
+					"caller":  "run",
+					"step":    "New",
+					"service": name,
 				}).Error(err)
 				os.Exit(1)
 			}
 
-			err = b.Run()
-			if err != nil {
-				log.WithFields(log.Fields{
-					"caller": "run",
-					"step":   "runCmd",
-				}).Error(err)
-			}
+			wg.Add(1)
+			go func(b *ballot.Ballot, name string) {
+				defer wg.Done()
+				err := b.Run()
+				if err != nil {
+					log.WithFields(log.Fields{
+						"caller":  "run",
+						"step":    "runCmd",
+						"service": name,
+					}).Error(err)
+				}
+			}(b, name)
 		}
+
+		wg.Wait()
+		log.Info("All elections stopped, shutting down")
 	},
 }
 

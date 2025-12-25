@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -12,7 +14,6 @@ import (
 	"github.com/hashicorp/consul/api"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
-	"golang.org/x/exp/slices"
 )
 
 type CommandExecutor interface {
@@ -191,6 +192,9 @@ func New(ctx context.Context, name string) (*Ballot, error) {
 	if b.ID == "" {
 		return nil, fmt.Errorf("service ID is required; please set the 'id' field in the configuration")
 	}
+	if b.Key == "" {
+		return nil, fmt.Errorf("key is required; please set the 'key' field in the configuration")
+	}
 	if b.Name == "" {
 		b.Name = name
 	}
@@ -206,22 +210,23 @@ func New(ctx context.Context, name string) (*Ballot, error) {
 
 // Ballot is a struct that holds the configuration for the leader election.
 type Ballot struct {
-	Name          string          `mapstructure:"-"`
-	ID            string          `mapstructure:"id"`
-	Key           string          `mapstructure:"key"`
-	ServiceChecks []string        `mapstructure:"serviceChecks"`
-	Token         string          `mapstructure:"consul.token"`
-	ExecOnPromote string          `mapstructure:"execOnPromote"`
-	ExecOnDemote  string          `mapstructure:"execOnDemote"`
-	PrimaryTag    string          `mapstructure:"primaryTag"`
-	ConsulAddress string          `mapstructure:"consul.address"`
-	TTL           time.Duration   `mapstructure:"ttl"`
-	LockDelay     time.Duration   `mapstructure:"lockDelay"`
-	sessionID     atomic.Value    // stores *string
-	leader        atomic.Bool     `mapstructure:"-"`
-	client        ConsulClient    `mapstructure:"-"`
-	ctx           context.Context `mapstructure:"-"`
-	executor      CommandExecutor `mapstructure:"-"`
+	Name                 string               `mapstructure:"-"`
+	ID                   string               `mapstructure:"id"`
+	Key                  string               `mapstructure:"key"`
+	ServiceChecks        []string             `mapstructure:"serviceChecks"`
+	Token                string               `mapstructure:"consul.token"`
+	ExecOnPromote        string               `mapstructure:"execOnPromote"`
+	ExecOnDemote         string               `mapstructure:"execOnDemote"`
+	PrimaryTag           string               `mapstructure:"primaryTag"`
+	ConsulAddress        string               `mapstructure:"consul.address"`
+	TTL                  time.Duration        `mapstructure:"ttl"`
+	LockDelay            time.Duration        `mapstructure:"lockDelay"`
+	sessionID            atomic.Value         // stores *string
+	leader               atomic.Bool          `mapstructure:"-"`
+	client               ConsulClient         `mapstructure:"-"`
+	ctx                  context.Context      `mapstructure:"-"`
+	executor             CommandExecutor      `mapstructure:"-"`
+	sessionRenewalCancel context.CancelFunc   `mapstructure:"-"`
 }
 
 // Copy *api.AgentService to *api.AgentServiceRegistration
@@ -300,10 +305,15 @@ func (b *Ballot) runCommand(command string, electionPayload *ElectionPayload) ([
 	if err != nil {
 		return nil, err
 	}
+	if len(args) == 0 {
+		return nil, fmt.Errorf("empty command")
+	}
 	cmd := b.executor.CommandContext(b.ctx, args[0], args[1:]...)
-	cmd.Env = append(cmd.Env, fmt.Sprintf("ADDRESS=%s", electionPayload.Address))
-	cmd.Env = append(cmd.Env, fmt.Sprintf("PORT=%d", electionPayload.Port))
-	cmd.Env = append(cmd.Env, fmt.Sprintf("SESSIONID=%s", electionPayload.SessionID))
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("ADDRESS=%s", electionPayload.Address),
+		fmt.Sprintf("PORT=%d", electionPayload.Port),
+		fmt.Sprintf("SESSIONID=%s", electionPayload.SessionID),
+	)
 	return cmd.CombinedOutput()
 }
 
@@ -326,11 +336,11 @@ func (b *Ballot) updateServiceTags(isLeader bool) error {
 	// Update tags based on leadership status
 	if isLeader && !hasPrimaryTag {
 		// Add primary tag if not present and this node is the leader
-		registration.Tags = append(registration.Tags, b.PrimaryTag)
+		registration.Tags = append(slices.Clone(registration.Tags), b.PrimaryTag)
 	} else if !isLeader && hasPrimaryTag {
 		// Remove primary tag if present and this node is not the leader
 		index := slices.Index(registration.Tags, b.PrimaryTag)
-		registration.Tags = append(registration.Tags[:index], registration.Tags[index+1:]...)
+		registration.Tags = slices.Delete(slices.Clone(registration.Tags), index, index+1)
 	} else {
 		// No changes needed
 		return nil
@@ -415,8 +425,8 @@ func (b *Ballot) cleanup(payload *ElectionPayload) error {
 		// Check if the primary tag is present
 		primaryTagIndex := slices.Index(service.ServiceTags, b.PrimaryTag)
 		if primaryTagIndex != -1 {
-			// Remove the primary tag
-			updatedTags := append(service.ServiceTags[:primaryTagIndex], service.ServiceTags[primaryTagIndex+1:]...)
+			// Remove the primary tag (clone to avoid mutating original slice)
+			updatedTags := slices.Delete(slices.Clone(service.ServiceTags), primaryTagIndex, primaryTagIndex+1)
 
 			// Prepare the catalog registration for update
 			catalogRegistration := b.copyCatalogServiceToRegistration(service)
@@ -544,6 +554,15 @@ func (b *Ballot) Run() error {
 	if tickerInterval < time.Second {
 		tickerInterval = time.Second
 	}
+
+	// Run the first election immediately
+	if err := b.election(); err != nil {
+		log.WithFields(log.Fields{
+			"caller": "Run",
+			"error":  err,
+		}).Error("Failed to run initial election")
+	}
+
 	electionTicker := time.NewTicker(tickerInterval)
 	defer electionTicker.Stop()
 
@@ -584,9 +603,17 @@ func (b *Ballot) handleServiceCriticalState() error {
 		return fmt.Errorf("failed to get health checks: %s", err)
 	}
 
-	// Determine the aggregate status
+	// Determine the aggregate status, filtering to only this instance's checks
 	state := "passing"
 	for _, check := range healthChecks {
+		// Only consider checks for this specific service instance
+		if check.ServiceID != b.ID {
+			continue
+		}
+		// If ServiceChecks is configured, only consider those specific checks
+		if len(b.ServiceChecks) > 0 && !slices.Contains(b.ServiceChecks, check.CheckID) {
+			continue
+		}
 		if check.Status == "critical" {
 			state = "critical"
 			break
@@ -630,12 +657,17 @@ func (b *Ballot) session() error {
 		}
 	}
 
+	// Cancel the previous session renewal goroutine if it exists
+	if b.sessionRenewalCancel != nil {
+		b.sessionRenewalCancel()
+	}
+
 	log.WithFields(log.Fields{
 		"caller": "session",
 	}).Trace("Creating new session")
 	sessionID, _, err := b.client.Session().Create(&api.SessionEntry{
 		Behavior:  "delete",
-		Checks:    append(b.ServiceChecks, "serfHealth"),
+		Checks:    append(slices.Clone(b.ServiceChecks), "serfHealth"),
 		TTL:       b.TTL.String(),
 		LockDelay: b.LockDelay,
 	}, nil)
@@ -649,6 +681,10 @@ func (b *Ballot) session() error {
 	}).Trace("Storing session ID")
 	b.sessionID.Store(&sessionID)
 
+	// Create a cancellable context for the renewal goroutine
+	renewCtx, renewCancel := context.WithCancel(b.ctx)
+	b.sessionRenewalCancel = renewCancel
+
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -659,7 +695,7 @@ func (b *Ballot) session() error {
 			}
 		}()
 
-		err := b.client.Session().RenewPeriodic(b.TTL.String(), sessionID, nil, b.ctx.Done())
+		err := b.client.Session().RenewPeriodic(b.TTL.String(), sessionID, nil, renewCtx.Done())
 		if err != nil {
 			log.WithFields(log.Fields{
 				"caller": "session",
