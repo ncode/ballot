@@ -49,6 +49,36 @@ func TestNew(t *testing.T) {
 		assert.Error(t, err)
 		assert.Nil(t, b)
 	})
+
+	t.Run("failure due to missing key", func(t *testing.T) {
+		// Set up configuration without the key field
+		viper.Set("election.services.nokey.id", "test_service_id")
+		viper.Set("election.services.nokey.primaryTag", "primary")
+
+		defer func() {
+			viper.Reset()
+		}()
+
+		b, err := New(context.Background(), "nokey")
+		assert.Error(t, err)
+		assert.Nil(t, b)
+		assert.Contains(t, err.Error(), "key is required")
+	})
+
+	t.Run("failure due to missing id", func(t *testing.T) {
+		// Set up configuration without the id field
+		viper.Set("election.services.noid.key", "election/test/leader")
+		viper.Set("election.services.noid.primaryTag", "primary")
+
+		defer func() {
+			viper.Reset()
+		}()
+
+		b, err := New(context.Background(), "noid")
+		assert.Error(t, err)
+		assert.Nil(t, b)
+		assert.Contains(t, err.Error(), "service ID is required")
+	})
 }
 
 func TestCopyServiceToRegistration(t *testing.T) {
@@ -126,36 +156,64 @@ func (m *MockCommandExecutor) CommandContext(ctx context.Context, name string, a
 }
 
 func TestRunCommand(t *testing.T) {
-	// Create a mock CommandExecutor
-	mockExecutor := new(MockCommandExecutor)
+	t.Run("successful command execution", func(t *testing.T) {
+		// Create a mock CommandExecutor
+		mockExecutor := new(MockCommandExecutor)
 
-	// Create a Ballot instance with the mock executor
-	b := &Ballot{
-		executor: mockExecutor,
-		ctx:      context.Background(),
-	}
+		// Create a Ballot instance with the mock executor
+		b := &Ballot{
+			executor: mockExecutor,
+			ctx:      context.Background(),
+		}
 
-	// Define the command to run
-	command := "echo hello"
-	payload := &ElectionPayload{
-		Address:   "127.0.0.1",
-		Port:      8080,
-		SessionID: "session",
-	}
+		// Define the command to run
+		command := "echo hello"
+		payload := &ElectionPayload{
+			Address:   "127.0.0.1",
+			Port:      8080,
+			SessionID: "session",
+		}
 
-	// Set up the expectation
-	// Here, we're using a command that just outputs "mocked" when run
-	mockCmd := exec.Command("echo", "mocked")
-	mockExecutor.On("CommandContext", b.ctx, "echo", []string{"hello"}).Return(mockCmd)
+		// Set up the expectation
+		// Here, we're using a command that just outputs "mocked" when run
+		mockCmd := exec.Command("echo", "mocked")
+		mockExecutor.On("CommandContext", b.ctx, "echo", []string{"hello"}).Return(mockCmd)
 
-	// Call the method under test
-	_, err := b.runCommand(command, payload)
+		// Call the method under test
+		_, err := b.runCommand(command, payload)
 
-	// Assert that the expectations were met
-	mockExecutor.AssertExpectations(t)
+		// Assert that the expectations were met
+		mockExecutor.AssertExpectations(t)
 
-	// Assert that the method did not return an error
-	assert.NoError(t, err)
+		// Assert that the method did not return an error
+		assert.NoError(t, err)
+	})
+
+	t.Run("empty command returns error", func(t *testing.T) {
+		// Create a mock CommandExecutor
+		mockExecutor := new(MockCommandExecutor)
+
+		// Create a Ballot instance with the mock executor
+		b := &Ballot{
+			executor: mockExecutor,
+			ctx:      context.Background(),
+		}
+
+		// Define an empty command
+		command := ""
+		payload := &ElectionPayload{
+			Address:   "127.0.0.1",
+			Port:      8080,
+			SessionID: "session",
+		}
+
+		// Call the method under test with empty command
+		_, err := b.runCommand(command, payload)
+
+		// Assert that an error is returned for empty command
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "empty command")
+	})
 }
 
 func TestIsLeader(t *testing.T) {
@@ -372,6 +430,47 @@ func TestSession(t *testing.T) {
 		assert.Error(t, err)
 		assert.Equal(t, expectedErr, err)
 	})
+
+	t.Run("session cancels previous renewal when creating new session", func(t *testing.T) {
+		firstSessionID := "session1"
+		secondSessionID := "session2"
+
+		mockSession := new(MockSession)
+		// First session creation
+		mockSession.On("Create", mock.Anything, (*api.WriteOptions)(nil)).Return(firstSessionID, nil, nil).Once()
+		mockSession.On("RenewPeriodic", mock.Anything, firstSessionID, (*api.WriteOptions)(nil), mock.Anything).Return(nil)
+		// Info check for first session (returns nil to indicate session expired, forcing new session creation)
+		mockSession.On("Info", firstSessionID, (*api.QueryOptions)(nil)).Return((*api.SessionEntry)(nil), &api.QueryMeta{}, nil)
+		// Second session creation
+		mockSession.On("Create", mock.Anything, (*api.WriteOptions)(nil)).Return(secondSessionID, nil, nil).Once()
+		mockSession.On("RenewPeriodic", mock.Anything, secondSessionID, (*api.WriteOptions)(nil), mock.Anything).Return(nil)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Session").Return(mockSession)
+
+		b := &Ballot{
+			client: mockClient,
+			TTL:    10 * time.Second,
+			ctx:    context.Background(),
+		}
+
+		// Create first session
+		err := b.session()
+		assert.NoError(t, err)
+		storedSessionID, ok := b.getSessionID()
+		assert.True(t, ok)
+		assert.Equal(t, firstSessionID, *storedSessionID)
+
+		// Verify sessionRenewalCancel is set
+		assert.NotNil(t, b.sessionRenewalCancel)
+
+		// Create second session - should cancel the first renewal
+		err = b.session()
+		assert.NoError(t, err)
+		storedSessionID, ok = b.getSessionID()
+		assert.True(t, ok)
+		assert.Equal(t, secondSessionID, *storedSessionID)
+	})
 }
 
 func TestHandleServiceCriticalState(t *testing.T) {
@@ -454,6 +553,102 @@ func TestHandleServiceCriticalState(t *testing.T) {
 		err := b.handleServiceCriticalState()
 		assert.Error(t, err)
 		assert.ErrorContains(t, err, expectedErr.Error())
+	})
+
+	t.Run("filters checks by service ID", func(t *testing.T) {
+		serviceID := "test_service_id"
+		mockHealth := new(MockHealth)
+		// Return multiple health checks, some for this instance and some for others
+		mockHealth.On("Checks", "test_service", (*api.QueryOptions)(nil)).Return([]*api.HealthCheck{
+			{ServiceID: serviceID, CheckID: "check1", Status: "passing"},
+			{ServiceID: "other_service_id", CheckID: "check2", Status: "critical"}, // Different instance - should be ignored
+		}, nil, nil)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Health").Return(mockHealth)
+
+		b := &Ballot{
+			client: mockClient,
+			ID:     serviceID,
+			Name:   "test_service",
+		}
+
+		// Should pass because only our instance's checks are considered
+		err := b.handleServiceCriticalState()
+		assert.NoError(t, err)
+	})
+
+	t.Run("filters checks by service ID with critical state", func(t *testing.T) {
+		serviceID := "test_service_id"
+		serviceName := "test_service"
+		primaryTag := "primary"
+
+		mockHealth := new(MockHealth)
+		mockSession := new(MockSession)
+		mockAgent := new(MockAgent)
+		mockCatalog := new(MockCatalog)
+
+		// Return health checks where this instance is critical
+		mockHealth.On("Checks", serviceName, (*api.QueryOptions)(nil)).Return([]*api.HealthCheck{
+			{ServiceID: serviceID, CheckID: "check1", Status: "critical"},
+			{ServiceID: "other_service_id", CheckID: "check2", Status: "passing"},
+		}, nil, nil)
+
+		sessionID := "session_id"
+		mockSession.On("Destroy", sessionID, (*api.WriteOptions)(nil)).Return(nil, nil)
+
+		// Mock Agent and Catalog for updateServiceTags
+		mockAgent.On("Service", serviceID, mock.Anything).Return(&api.AgentService{
+			ID:      serviceID,
+			Service: serviceName,
+			Tags:    []string{},
+		}, nil, nil)
+		mockCatalog.On("Service", serviceName, primaryTag, mock.Anything).Return([]*api.CatalogService{}, nil, nil)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Health").Return(mockHealth)
+		mockClient.On("Session").Return(mockSession)
+		mockClient.On("Agent").Return(mockAgent)
+		mockClient.On("Catalog").Return(mockCatalog)
+
+		b := &Ballot{
+			client:     mockClient,
+			ID:         serviceID,
+			Name:       serviceName,
+			PrimaryTag: primaryTag,
+		}
+		b.sessionID.Store(&sessionID)
+
+		err := b.handleServiceCriticalState()
+		// Should return error because service is in critical state
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "service is in critical state")
+		// Verify session was destroyed due to critical state
+		mockSession.AssertCalled(t, "Destroy", sessionID, (*api.WriteOptions)(nil))
+	})
+
+	t.Run("filters checks by ServiceChecks list", func(t *testing.T) {
+		serviceID := "test_service_id"
+		mockHealth := new(MockHealth)
+		// Return multiple health checks
+		mockHealth.On("Checks", "test_service", (*api.QueryOptions)(nil)).Return([]*api.HealthCheck{
+			{ServiceID: serviceID, CheckID: "check1", Status: "passing"},
+			{ServiceID: serviceID, CheckID: "check2", Status: "critical"}, // Not in ServiceChecks - should be ignored
+		}, nil, nil)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Health").Return(mockHealth)
+
+		b := &Ballot{
+			client:        mockClient,
+			ID:            serviceID,
+			Name:          "test_service",
+			ServiceChecks: []string{"check1"}, // Only consider check1
+		}
+
+		// Should pass because check2 (which is critical) is not in ServiceChecks
+		err := b.handleServiceCriticalState()
+		assert.NoError(t, err)
 	})
 }
 
