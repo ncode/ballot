@@ -21,9 +21,67 @@ Ballot leverages Consul's session and key-value (KV) store APIs to perform leade
 4. Tagging the Leader: The leader is tagged with a specified tag (e.g., primary) in the Consul catalog.
 5. Health Checks: The leader's health is continuously monitored. If the leader becomes unhealthy, the lock is released, and a new election occurs.
 6. Hooks Execution: Custom scripts or commands can be executed when a service is promoted to leader or demoted.
+
+```mermaid
+sequenceDiagram
+    participant B1 as Ballot Instance 1
+    participant B2 as Ballot Instance 2
+    participant C as Consul
+
+    B1->>C: Create Session
+    B2->>C: Create Session
+    B1->>C: Acquire Lock (KV)
+    Note right of C: B1 wins lock
+    B2->>C: Acquire Lock (KV)
+    Note right of C: B2 fails, waits
+    B1->>C: Tag service as "primary"
+    B1->>B1: Execute execOnPromote
+    loop Health Check
+        C->>B1: Monitor health
+    end
+    Note over B1: B1 becomes unhealthy
+    C-->>B1: Session invalidated
+    B1->>B1: Execute execOnDemote
+    B2->>C: Acquire Lock (KV)
+    Note right of C: B2 wins lock
+    B2->>C: Tag service as "primary"
+    B2->>B2: Execute execOnPromote
+```
+
 More information about Consul sessions and leader elections can be found in [https://developer.hashicorp.com/consul/tutorials/developer-configuration/application-leader-elections](https://developer.hashicorp.com/consul/tutorials/developer-configuration/application-leader-elections).
 
-### How do try it?
+### Requirements
+
+- Go 1.21 or higher
+- Consul 1.10 or higher
+
+### Installation
+
+**Using Go:**
+```bash
+go install github.com/ncode/ballot@latest
+```
+
+**From source:**
+```bash
+git clone https://github.com/ncode/ballot
+cd ballot
+go build -o ballot .
+```
+
+### Usage
+
+```bash
+# Run with a config file
+ballot run --config /path/to/config.yaml
+
+# Default config location: $HOME/.ballot.yaml
+ballot run
+```
+
+Ballot also supports environment variables via Viper. Any config option can be set using the `BALLOT_` prefix (e.g., `BALLOT_CONSUL_TOKEN`).
+
+### How to try it?
 
 1. Install Ballot
 ```bash
@@ -55,7 +113,7 @@ $ touch consul/state/ready3
 
 ### Environment variables
 
-During the call of execOnPromote and execOnDemote a few environment variables are injected incase you need to use the and port of the service for an intended automation.
+During the call of execOnPromote and execOnDemote a few environment variables are injected in case you need to use the address and port of the service for automation.
 
 ```bash
 $ADDRESS   # IP Address of the current service elected
@@ -89,16 +147,40 @@ election:
 
 ### Development and examples
 
-Examples of configuration files and service definitions can be found inside config/development
+Examples of configuration files and service definitions can be found inside `configs/development`.
 
+### Production deployment
+
+Ballot handles SIGINT and SIGTERM for graceful shutdown. Logs are output in JSON format to stdout.
+
+**Systemd example:**
+```ini
+[Unit]
+Description=Ballot Leader Election
+After=network.target consul.service
+Wants=consul.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ballot run --config /etc/ballot/config.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Multiple elections:** Ballot can manage elections for multiple services simultaneously. Add multiple entries to `election.enabled` and configure each under `election.services`.
 
 ### Contributing
 
-Contributions are welcome! Please open an issue or submit a pull request for any improvements, bug fixes, or new features.
+Contributions are welcome! Please:
+- Open an issue to discuss significant changes before submitting a PR
+- Include tests for bug fixes and new features
+- Run `go test ./...` and `go vet ./...` before submitting
 
 ### TODO
 
-- Write more tests
 - Allow to pre-define the preferred leader
 
 ### License
