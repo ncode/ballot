@@ -158,18 +158,15 @@ func TestIntegration_LeaderFailover(t *testing.T) {
 	defer cancel()
 
 	// Setup and create first ballot
+	// Note: Ballot copies config at creation time, so resetting viper after
+	// ballot1 is created won't affect it.
 	setupViper(t, serviceID1, electionKey)
 	ballot1, err := New(ctx, serviceID1)
 	require.NoError(t, err)
 	defer ballot1.releaseSession()
 
-	// Setup and create second ballot
-	viper.Set(fmt.Sprintf("election.services.%s.id", serviceID2), serviceID2)
-	viper.Set(fmt.Sprintf("election.services.%s.key", serviceID2), electionKey)
-	viper.Set(fmt.Sprintf("election.services.%s.primaryTag", serviceID2), testPrimaryTag)
-	viper.Set(fmt.Sprintf("election.services.%s.serviceChecks", serviceID2), []string{fmt.Sprintf("service:%s", serviceID2)})
-	viper.Set(fmt.Sprintf("election.services.%s.ttl", serviceID2), "10s")
-	viper.Set(fmt.Sprintf("election.services.%s.lockDelay", serviceID2), "1s")
+	// Setup and create second ballot with fresh viper config
+	setupViper(t, serviceID2, electionKey)
 	ballot2, err := New(ctx, serviceID2)
 	require.NoError(t, err)
 	defer ballot2.releaseSession()
@@ -310,6 +307,8 @@ func TestIntegration_MultipleInstances(t *testing.T) {
 	defer cancel()
 
 	// Register multiple services and create ballots
+	// Note: Each iteration resets viper, but Ballot copies config at creation
+	// time, so previously created ballots are unaffected.
 	for i := 0; i < numInstances; i++ {
 		services[i] = fmt.Sprintf("%s-%d", baseID, i)
 		registerTestService(t, client, services[i], 8090+i)
