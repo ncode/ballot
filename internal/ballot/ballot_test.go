@@ -1858,3 +1858,501 @@ func (m *MockKV) Acquire(p *api.KVPair, q *api.WriteOptions) (bool, *api.WriteMe
 	errResult := args.Error(2)
 	return boolResult, meta, errResult
 }
+
+func TestSessionWrapper_Destroy(t *testing.T) {
+	mockSession := new(MockSession)
+	sessionWrapper := &SessionWrapper{session: mockSession}
+
+	sessionID := "session_id"
+	writeOptions := &api.WriteOptions{}
+
+	expectedMeta := &api.WriteMeta{}
+	expectedErr := errors.New("destroy error")
+
+	mockSession.On("Destroy", sessionID, writeOptions).Return(expectedMeta, expectedErr)
+
+	meta, err := sessionWrapper.Destroy(sessionID, writeOptions)
+
+	assert.Equal(t, expectedMeta, meta)
+	assert.Equal(t, expectedErr, err)
+	mockSession.AssertCalled(t, "Destroy", sessionID, writeOptions)
+}
+
+func TestSessionWrapper_Info(t *testing.T) {
+	mockSession := new(MockSession)
+	sessionWrapper := &SessionWrapper{session: mockSession}
+
+	sessionID := "session_id"
+	queryOptions := &api.QueryOptions{}
+
+	expectedEntry := &api.SessionEntry{ID: sessionID}
+	expectedMeta := &api.QueryMeta{}
+	expectedErr := errors.New("info error")
+
+	mockSession.On("Info", sessionID, queryOptions).Return(expectedEntry, expectedMeta, expectedErr)
+
+	entry, meta, err := sessionWrapper.Info(sessionID, queryOptions)
+
+	assert.Equal(t, expectedEntry, entry)
+	assert.Equal(t, expectedMeta, meta)
+	assert.Equal(t, expectedErr, err)
+	mockSession.AssertCalled(t, "Info", sessionID, queryOptions)
+}
+
+func TestKVWrapper_Put(t *testing.T) {
+	mockKV := new(MockKV)
+	kvWrapper := &KVWrapper{kv: mockKV}
+
+	kvPair := &api.KVPair{Key: "test_key", Value: []byte("test_value")}
+	writeOptions := &api.WriteOptions{}
+
+	expectedMeta := &api.WriteMeta{}
+	expectedErr := errors.New("put error")
+
+	mockKV.On("Put", kvPair, writeOptions).Return(expectedMeta, expectedErr)
+
+	meta, err := kvWrapper.Put(kvPair, writeOptions)
+
+	assert.Equal(t, expectedMeta, meta)
+	assert.Equal(t, expectedErr, err)
+	mockKV.AssertCalled(t, "Put", kvPair, writeOptions)
+}
+
+func TestRun(t *testing.T) {
+	t.Run("Run exits on context cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+
+		sessionID := "session_id"
+		b := &Ballot{
+			ID:         "test_service_id",
+			Name:       "test_service",
+			Key:        "election/test_service/leader",
+			PrimaryTag: "primary",
+			TTL:        100 * time.Millisecond,
+			ctx:        ctx,
+		}
+		b.sessionID.Store(&sessionID)
+
+		// Mock health checks
+		mockHealth := new(MockHealth)
+		mockHealth.On("Checks", b.Name, mock.Anything).Return([]*api.HealthCheck{
+			{Status: "passing"},
+		}, nil, nil)
+
+		// Mock session
+		mockSession := new(MockSession)
+		mockSession.On("Create", mock.Anything, mock.Anything).Return(sessionID, nil, nil)
+		mockSession.On("RenewPeriodic", mock.Anything, sessionID, mock.Anything, mock.Anything).Return(nil)
+		mockSession.On("Info", sessionID, mock.Anything).Return(&api.SessionEntry{ID: sessionID}, &api.QueryMeta{}, nil)
+
+		// Mock KV
+		payload := &ElectionPayload{
+			Address:   "127.0.0.1",
+			Port:      8080,
+			SessionID: sessionID,
+		}
+		data, _ := json.Marshal(payload)
+		mockKV := new(MockKV)
+		mockKV.On("Acquire", mock.Anything, mock.Anything).Return(true, nil, nil)
+		mockKV.On("Get", b.Key, mock.Anything).Return(&api.KVPair{
+			Key:     b.Key,
+			Value:   data,
+			Session: sessionID,
+		}, nil, nil)
+
+		// Mock Agent
+		service := &api.AgentService{
+			ID:      b.ID,
+			Service: b.Name,
+			Address: "127.0.0.1",
+			Port:    8080,
+			Tags:    []string{},
+		}
+		mockAgent := new(MockAgent)
+		mockAgent.On("Service", b.ID, mock.Anything).Return(service, nil, nil)
+		mockAgent.On("ServiceRegister", mock.Anything).Return(nil)
+
+		// Mock Catalog
+		mockCatalog := new(MockCatalog)
+		mockCatalog.On("Service", b.Name, b.PrimaryTag, mock.Anything).Return([]*api.CatalogService{}, nil, nil)
+		mockCatalog.On("Service", b.Name, "", mock.Anything).Return([]*api.CatalogService{}, nil, nil)
+		mockCatalog.On("Register", mock.Anything, mock.Anything).Return(nil, nil)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Health").Return(mockHealth)
+		mockClient.On("Session").Return(mockSession)
+		mockClient.On("KV").Return(mockKV)
+		mockClient.On("Agent").Return(mockAgent)
+		mockClient.On("Catalog").Return(mockCatalog)
+
+		b.client = mockClient
+
+		// Run in goroutine and cancel after short delay
+		done := make(chan error, 1)
+		go func() {
+			done <- b.Run()
+		}()
+
+		// Cancel after letting it run briefly
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+
+		err := <-done
+		assert.NoError(t, err)
+	})
+}
+
+func TestGetService_EmptyServiceID(t *testing.T) {
+	b := &Ballot{
+		ID: "",
+	}
+
+	service, catalogServices, err := b.getService()
+	assert.Error(t, err)
+	assert.Nil(t, service)
+	assert.Nil(t, catalogServices)
+	assert.Contains(t, err.Error(), "service ID is empty")
+}
+
+func TestGetService_AgentServiceError(t *testing.T) {
+	mockAgent := new(MockAgent)
+	expectedErr := errors.New("agent service error")
+	mockAgent.On("Service", "test_id", mock.Anything).Return(nil, nil, expectedErr)
+
+	mockClient := &MockConsulClient{}
+	mockClient.On("Agent").Return(mockAgent)
+
+	b := &Ballot{
+		ID:     "test_id",
+		client: mockClient,
+	}
+
+	service, catalogServices, err := b.getService()
+	assert.Error(t, err)
+	assert.Nil(t, service)
+	assert.Nil(t, catalogServices)
+	assert.Equal(t, expectedErr, err)
+}
+
+func TestGetService_CatalogServiceError(t *testing.T) {
+	serviceID := "test_service_id"
+	serviceName := "test_service"
+
+	mockAgent := new(MockAgent)
+	mockAgent.On("Service", serviceID, mock.Anything).Return(&api.AgentService{
+		ID:      serviceID,
+		Service: serviceName,
+	}, nil, nil)
+
+	expectedErr := errors.New("catalog service error")
+	mockCatalog := new(MockCatalog)
+	mockCatalog.On("Service", serviceName, "primary", mock.Anything).Return(nil, nil, expectedErr)
+
+	mockClient := &MockConsulClient{}
+	mockClient.On("Agent").Return(mockAgent)
+	mockClient.On("Catalog").Return(mockCatalog)
+
+	b := &Ballot{
+		ID:         serviceID,
+		Name:       serviceName,
+		PrimaryTag: "primary",
+		client:     mockClient,
+	}
+
+	service, catalogServices, err := b.getService()
+	assert.Error(t, err)
+	assert.NotNil(t, service)
+	assert.Nil(t, catalogServices)
+	assert.Equal(t, expectedErr, err)
+}
+
+func TestUpdateServiceTags_GetServiceError(t *testing.T) {
+	mockAgent := new(MockAgent)
+	expectedErr := errors.New("get service error")
+	mockAgent.On("Service", "test_id", mock.Anything).Return(nil, nil, expectedErr)
+
+	mockClient := &MockConsulClient{}
+	mockClient.On("Agent").Return(mockAgent)
+
+	b := &Ballot{
+		ID:     "test_id",
+		client: mockClient,
+	}
+
+	err := b.updateServiceTags(true)
+	assert.Error(t, err)
+	assert.Equal(t, expectedErr, err)
+}
+
+func TestSession_ClientNil(t *testing.T) {
+	b := &Ballot{
+		client: nil,
+	}
+
+	err := b.session()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "consul client is required")
+}
+
+func TestSession_ExistingValidSession(t *testing.T) {
+	sessionID := "existing_session"
+
+	mockSession := new(MockSession)
+	mockSession.On("Info", sessionID, (*api.QueryOptions)(nil)).Return(&api.SessionEntry{ID: sessionID}, &api.QueryMeta{}, nil)
+
+	mockClient := &MockConsulClient{}
+	mockClient.On("Session").Return(mockSession)
+
+	b := &Ballot{
+		client: mockClient,
+		TTL:    10 * time.Second,
+		ctx:    context.Background(),
+	}
+	b.sessionID.Store(&sessionID)
+
+	err := b.session()
+	assert.NoError(t, err)
+
+	// Verify we didn't create a new session
+	mockSession.AssertNotCalled(t, "Create", mock.Anything, mock.Anything)
+}
+
+func TestSession_InfoError(t *testing.T) {
+	sessionID := "session_with_error"
+
+	expectedErr := errors.New("info error")
+	mockSession := new(MockSession)
+	mockSession.On("Info", sessionID, (*api.QueryOptions)(nil)).Return((*api.SessionEntry)(nil), (*api.QueryMeta)(nil), expectedErr)
+
+	mockClient := &MockConsulClient{}
+	mockClient.On("Session").Return(mockSession)
+
+	b := &Ballot{
+		client: mockClient,
+		TTL:    10 * time.Second,
+		ctx:    context.Background(),
+	}
+	b.sessionID.Store(&sessionID)
+
+	err := b.session()
+	assert.Error(t, err)
+	assert.Equal(t, expectedErr, err)
+}
+
+func TestElection_HandleCriticalStateError(t *testing.T) {
+	b := &Ballot{
+		ID:   "test_service_id",
+		Name: "test_service",
+	}
+
+	mockHealth := new(MockHealth)
+	expectedErr := errors.New("health check error")
+	mockHealth.On("Checks", b.Name, mock.Anything).Return(nil, nil, expectedErr)
+
+	mockClient := &MockConsulClient{}
+	mockClient.On("Health").Return(mockHealth)
+
+	b.client = mockClient
+
+	err := b.election()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), expectedErr.Error())
+}
+
+func TestElection_GetServiceError(t *testing.T) {
+	b := &Ballot{
+		ID:   "test_service_id",
+		Name: "test_service",
+	}
+
+	mockHealth := new(MockHealth)
+	mockHealth.On("Checks", b.Name, mock.Anything).Return([]*api.HealthCheck{
+		{Status: "passing"},
+	}, nil, nil)
+
+	mockAgent := new(MockAgent)
+	expectedErr := errors.New("agent service error")
+	mockAgent.On("Service", b.ID, mock.Anything).Return(nil, nil, expectedErr)
+
+	mockClient := &MockConsulClient{}
+	mockClient.On("Health").Return(mockHealth)
+	mockClient.On("Agent").Return(mockAgent)
+
+	b.client = mockClient
+
+	err := b.election()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to get service")
+}
+
+func TestElection_SessionError(t *testing.T) {
+	b := &Ballot{
+		ID:   "test_service_id",
+		Name: "test_service",
+		TTL:  10 * time.Second,
+		ctx:  context.Background(),
+	}
+
+	mockHealth := new(MockHealth)
+	mockHealth.On("Checks", b.Name, mock.Anything).Return([]*api.HealthCheck{
+		{Status: "passing"},
+	}, nil, nil)
+
+	mockAgent := new(MockAgent)
+	mockAgent.On("Service", b.ID, mock.Anything).Return(&api.AgentService{
+		ID:      b.ID,
+		Service: b.Name,
+	}, nil, nil)
+
+	mockCatalog := new(MockCatalog)
+	mockCatalog.On("Service", b.Name, "", mock.Anything).Return([]*api.CatalogService{}, nil, nil)
+
+	expectedErr := errors.New("session create error")
+	mockSession := new(MockSession)
+	mockSession.On("Create", mock.Anything, mock.Anything).Return("", nil, expectedErr)
+
+	mockClient := &MockConsulClient{}
+	mockClient.On("Health").Return(mockHealth)
+	mockClient.On("Agent").Return(mockAgent)
+	mockClient.On("Catalog").Return(mockCatalog)
+	mockClient.On("Session").Return(mockSession)
+
+	b.client = mockClient
+
+	err := b.election()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to create session")
+}
+
+func TestElection_NilSessionID(t *testing.T) {
+	sessionID := "session_id"
+	b := &Ballot{
+		ID:         "test_service_id",
+		Name:       "test_service",
+		Key:        "election/test/leader",
+		PrimaryTag: "primary",
+		TTL:        10 * time.Second,
+		ctx:        context.Background(),
+	}
+
+	mockHealth := new(MockHealth)
+	mockHealth.On("Checks", b.Name, mock.Anything).Return([]*api.HealthCheck{
+		{Status: "passing"},
+	}, nil, nil)
+
+	mockAgent := new(MockAgent)
+	mockAgent.On("Service", b.ID, mock.Anything).Return(&api.AgentService{
+		ID:      b.ID,
+		Service: b.Name,
+	}, nil, nil)
+	mockAgent.On("ServiceRegister", mock.Anything).Return(nil)
+
+	mockCatalog := new(MockCatalog)
+	mockCatalog.On("Service", b.Name, "", mock.Anything).Return([]*api.CatalogService{}, nil, nil)
+	mockCatalog.On("Service", b.Name, b.PrimaryTag, mock.Anything).Return([]*api.CatalogService{}, nil, nil)
+
+	// Session creation returns a valid session ID
+	mockSession := new(MockSession)
+	mockSession.On("Create", mock.Anything, mock.Anything).Return(sessionID, nil, nil)
+	mockSession.On("RenewPeriodic", mock.Anything, sessionID, mock.Anything, mock.Anything).Return(nil)
+
+	// Mock KV
+	payload := &ElectionPayload{
+		Address:   "",
+		Port:      0,
+		SessionID: sessionID,
+	}
+	data, _ := json.Marshal(payload)
+	mockKV := new(MockKV)
+	mockKV.On("Acquire", mock.Anything, mock.Anything).Return(true, nil, nil)
+	mockKV.On("Get", b.Key, mock.Anything).Return(&api.KVPair{
+		Key:     b.Key,
+		Value:   data,
+		Session: sessionID,
+	}, nil, nil)
+
+	mockClient := &MockConsulClient{}
+	mockClient.On("Health").Return(mockHealth)
+	mockClient.On("Agent").Return(mockAgent)
+	mockClient.On("Catalog").Return(mockCatalog)
+	mockClient.On("Session").Return(mockSession)
+	mockClient.On("KV").Return(mockKV)
+
+	b.client = mockClient
+
+	err := b.election()
+	assert.NoError(t, err)
+}
+
+func TestCleanup_CatalogError(t *testing.T) {
+	primaryTag := "primary"
+	serviceName := "test_service"
+
+	leaderPayload := &ElectionPayload{
+		Address:   "127.0.0.1",
+		Port:      8080,
+		SessionID: "session_id",
+	}
+
+	mockCatalog := new(MockCatalog)
+	expectedErr := errors.New("catalog error")
+	mockCatalog.On("Service", serviceName, "", mock.Anything).Return(nil, nil, expectedErr)
+
+	mockClient := &MockConsulClient{}
+	mockClient.On("Catalog").Return(mockCatalog)
+
+	b := &Ballot{
+		client:     mockClient,
+		Name:       serviceName,
+		PrimaryTag: primaryTag,
+	}
+
+	sessionID := leaderPayload.SessionID
+	b.leader.Store(true)
+	b.sessionID.Store(&sessionID)
+
+	err := b.cleanup(leaderPayload)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to retrieve services from the catalog")
+}
+
+func TestVerifyAndUpdateLeadershipStatus_NilSessionData(t *testing.T) {
+	sessionID := "session_id"
+	b := &Ballot{
+		Key: "election/test/leader",
+	}
+	b.sessionID.Store(&sessionID)
+
+	mockKV := new(MockKV)
+	mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(nil, nil, nil)
+
+	mockClient := &MockConsulClient{}
+	mockClient.On("KV").Return(mockKV)
+
+	b.client = mockClient
+
+	err := b.verifyAndUpdateLeadershipStatus()
+	assert.NoError(t, err)
+}
+
+func TestHandleServiceCriticalState_WarningState(t *testing.T) {
+	serviceID := "test_service_id"
+	serviceName := "test_service"
+
+	mockHealth := new(MockHealth)
+	mockHealth.On("Checks", serviceName, (*api.QueryOptions)(nil)).Return([]*api.HealthCheck{
+		{ServiceID: serviceID, CheckID: "check1", Status: "warning"},
+	}, nil, nil)
+
+	mockClient := &MockConsulClient{}
+	mockClient.On("Health").Return(mockHealth)
+
+	b := &Ballot{
+		client: mockClient,
+		ID:     serviceID,
+		Name:   serviceName,
+	}
+
+	err := b.handleServiceCriticalState()
+	assert.NoError(t, err)
+}

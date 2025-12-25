@@ -17,6 +17,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"sync"
@@ -32,41 +33,56 @@ import (
 var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run the ballot and starts all the defined elections",
-	Run: func(cmd *cobra.Command, args []string) {
-		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-		defer cancel()
+	RunE:  runElection,
+}
 
-		var wg sync.WaitGroup
-		enabledServices := viper.GetStringSlice("election.enabled")
+func runElection(cmd *cobra.Command, args []string) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 
-		for _, name := range enabledServices {
-			b, err := ballot.New(ctx, name)
-			if err != nil {
-				log.WithFields(log.Fields{
-					"caller":  "run",
-					"step":    "New",
-					"service": name,
-				}).Error(err)
-				os.Exit(1)
-			}
+	return runElectionWithContext(ctx)
+}
 
-			wg.Add(1)
-			go func(b *ballot.Ballot, name string) {
-				defer wg.Done()
-				err := b.Run()
-				if err != nil {
-					log.WithFields(log.Fields{
-						"caller":  "run",
-						"step":    "runCmd",
-						"service": name,
-					}).Error(err)
-				}
-			}(b, name)
+func runElectionWithContext(ctx context.Context) error {
+	var wg sync.WaitGroup
+	enabledServices := viper.GetStringSlice("election.enabled")
+
+	if len(enabledServices) == 0 {
+		return fmt.Errorf("no services enabled for election")
+	}
+
+	errCh := make(chan error, len(enabledServices))
+
+	for _, name := range enabledServices {
+		b, err := ballot.New(ctx, name)
+		if err != nil {
+			return fmt.Errorf("failed to create ballot for service %s: %w", name, err)
 		}
 
-		wg.Wait()
-		log.Info("All elections stopped, shutting down")
-	},
+		wg.Add(1)
+		go func(b *ballot.Ballot, name string) {
+			defer wg.Done()
+			if err := b.Run(); err != nil {
+				errCh <- fmt.Errorf("service %s: %w", name, err)
+			}
+		}(b, name)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	// Collect any errors from running elections
+	var errs []error
+	for err := range errCh {
+		errs = append(errs, err)
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("election errors: %v", errs)
+	}
+
+	log.Info("All elections stopped, shutting down")
+	return nil
 }
 
 func init() {
