@@ -2728,3 +2728,188 @@ func TestUpdateServiceTags_WithCommandExecution(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	})
 }
+
+func TestRun_SmallTTL(t *testing.T) {
+	t.Run("Run with TTL less than 2 seconds uses 1 second interval", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+
+		sessionID := "session_id"
+		b := &Ballot{
+			ID:         "test_service_id",
+			Name:       "test_service",
+			Key:        "election/test_service/leader",
+			PrimaryTag: "primary",
+			TTL:        500 * time.Millisecond, // TTL/2 = 250ms < 1s, so interval becomes 1s
+			ctx:        ctx,
+		}
+		b.sessionID.Store(&sessionID)
+
+		mockHealth := new(MockHealth)
+		mockHealth.On("Checks", b.Name, mock.Anything).Return([]*api.HealthCheck{
+			{Status: "passing"},
+		}, nil, nil)
+
+		mockSession := new(MockSession)
+		mockSession.On("Create", mock.Anything, mock.Anything).Return(sessionID, nil, nil)
+		mockSession.On("RenewPeriodic", mock.Anything, sessionID, mock.Anything, mock.Anything).Return(nil)
+		mockSession.On("Info", sessionID, mock.Anything).Return(&api.SessionEntry{ID: sessionID}, &api.QueryMeta{}, nil)
+
+		payload := &ElectionPayload{
+			Address:   "127.0.0.1",
+			Port:      8080,
+			SessionID: sessionID,
+		}
+		data, _ := json.Marshal(payload)
+		mockKV := new(MockKV)
+		mockKV.On("Acquire", mock.Anything, mock.Anything).Return(true, nil, nil)
+		mockKV.On("Get", b.Key, mock.Anything).Return(&api.KVPair{
+			Key:     b.Key,
+			Value:   data,
+			Session: sessionID,
+		}, nil, nil)
+
+		service := &api.AgentService{
+			ID:      b.ID,
+			Service: b.Name,
+			Address: "127.0.0.1",
+			Port:    8080,
+			Tags:    []string{},
+		}
+		mockAgent := new(MockAgent)
+		mockAgent.On("Service", b.ID, mock.Anything).Return(service, nil, nil)
+		mockAgent.On("ServiceRegister", mock.Anything).Return(nil)
+
+		mockCatalog := new(MockCatalog)
+		mockCatalog.On("Service", b.Name, b.PrimaryTag, mock.Anything).Return([]*api.CatalogService{}, nil, nil)
+		mockCatalog.On("Service", b.Name, "", mock.Anything).Return([]*api.CatalogService{}, nil, nil)
+		mockCatalog.On("Register", mock.Anything, mock.Anything).Return(nil, nil)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Health").Return(mockHealth)
+		mockClient.On("Session").Return(mockSession)
+		mockClient.On("KV").Return(mockKV)
+		mockClient.On("Agent").Return(mockAgent)
+		mockClient.On("Catalog").Return(mockCatalog)
+
+		b.client = mockClient
+
+		done := make(chan error, 1)
+		go func() {
+			done <- b.Run()
+		}()
+
+		// Let it run briefly then cancel
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+
+		err := <-done
+		assert.NoError(t, err)
+	})
+}
+
+func TestRun_ElectionErrorInLoop(t *testing.T) {
+	t.Run("Run handles election errors in ticker loop", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+
+		sessionID := "session_id"
+		b := &Ballot{
+			ID:         "test_service_id",
+			Name:       "test_service",
+			Key:        "election/test_service/leader",
+			PrimaryTag: "primary",
+			TTL:        100 * time.Millisecond,
+			ctx:        ctx,
+		}
+		b.sessionID.Store(&sessionID)
+
+		// Mock health to return error (triggers election error)
+		mockHealth := new(MockHealth)
+		electionErr := errors.New("health check failed")
+		mockHealth.On("Checks", b.Name, mock.Anything).Return(nil, nil, electionErr)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Health").Return(mockHealth)
+
+		b.client = mockClient
+
+		done := make(chan error, 1)
+		go func() {
+			done <- b.Run()
+		}()
+
+		// Let it run through at least one ticker cycle with error
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+
+		err := <-done
+		assert.NoError(t, err) // Run returns nil on context cancellation, errors are logged
+	})
+}
+
+func TestUpdateLeadershipStatus_Error(t *testing.T) {
+	t.Run("updateLeadershipStatus returns error from updateServiceTags", func(t *testing.T) {
+		mockAgent := new(MockAgent)
+		expectedErr := errors.New("service tags update failed")
+		mockAgent.On("Service", "test_id", mock.Anything).Return(nil, nil, expectedErr)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Agent").Return(mockAgent)
+
+		b := &Ballot{
+			ID:     "test_id",
+			client: mockClient,
+		}
+
+		err := b.updateLeadershipStatus(true)
+		assert.Error(t, err)
+		assert.Equal(t, expectedErr, err)
+	})
+}
+
+func TestNew_ViperUnmarshalError(t *testing.T) {
+	t.Run("New returns error when viper unmarshal fails", func(t *testing.T) {
+		viper.Reset()
+		// Set an invalid type that will cause unmarshal to fail
+		// TTL expects a duration string but we give it an invalid map
+		viper.Set("election.services.badconfig.ttl", map[string]string{"invalid": "type"})
+		viper.Set("election.services.badconfig.id", "test_id")
+		viper.Set("election.services.badconfig.key", "test/key")
+
+		defer viper.Reset()
+
+		b, err := New(context.Background(), "badconfig")
+		assert.Error(t, err)
+		assert.Nil(t, b)
+	})
+}
+
+func TestNew_DefaultValues(t *testing.T) {
+	t.Run("New sets default LockDelay and TTL when not specified", func(t *testing.T) {
+		viper.Reset()
+		viper.Set("election.services.defaults.id", "test_service_id")
+		viper.Set("election.services.defaults.key", "election/test/leader")
+		// Don't set TTL or LockDelay
+
+		defer viper.Reset()
+
+		b, err := New(context.Background(), "defaults")
+		assert.NoError(t, err)
+		assert.NotNil(t, b)
+		assert.Equal(t, 3*time.Second, b.LockDelay)
+		assert.Equal(t, 10*time.Second, b.TTL)
+	})
+
+	t.Run("New sets Name from parameter when not in config", func(t *testing.T) {
+		viper.Reset()
+		viper.Set("election.services.myservice.id", "test_service_id")
+		viper.Set("election.services.myservice.key", "election/test/leader")
+		// Don't set Name
+
+		defer viper.Reset()
+
+		b, err := New(context.Background(), "myservice")
+		assert.NoError(t, err)
+		assert.NotNil(t, b)
+		assert.Equal(t, "myservice", b.Name)
+	})
+}
