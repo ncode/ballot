@@ -14,8 +14,10 @@ test-coverage:
 	go tool cover -html=coverage.out -o coverage.html
 
 test-integration: integration-up
-	CONSUL_HTTP_ADDR=http://localhost:8500 go test -v -tags=integration -race ./...
-	$(MAKE) integration-down
+	CONSUL_HTTP_ADDR=http://localhost:8500 go test -v -tags=integration -race ./... ; \
+	status=$$? ; \
+	$(MAKE) integration-down ; \
+	exit $$status
 
 integration-up:
 	docker compose -f configs/integration/docker-compose.yaml up -d --wait

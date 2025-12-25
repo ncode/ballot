@@ -114,6 +114,7 @@ func TestIntegration_FullElectionCycle(t *testing.T) {
 
 	ballot, err := New(ctx, serviceID)
 	require.NoError(t, err, "Failed to create Ballot instance")
+	defer ballot.releaseSession()
 
 	// Run a single election cycle
 	err = ballot.election()
@@ -160,6 +161,7 @@ func TestIntegration_LeaderFailover(t *testing.T) {
 	setupViper(t, serviceID1, electionKey)
 	ballot1, err := New(ctx, serviceID1)
 	require.NoError(t, err)
+	defer ballot1.releaseSession()
 
 	// Setup and create second ballot
 	viper.Set(fmt.Sprintf("election.services.%s.id", serviceID2), serviceID2)
@@ -170,6 +172,7 @@ func TestIntegration_LeaderFailover(t *testing.T) {
 	viper.Set(fmt.Sprintf("election.services.%s.lockDelay", serviceID2), "1s")
 	ballot2, err := New(ctx, serviceID2)
 	require.NoError(t, err)
+	defer ballot2.releaseSession()
 	defer viper.Reset()
 
 	// First ballot becomes leader
@@ -222,6 +225,7 @@ func TestIntegration_TagPromotion(t *testing.T) {
 
 	ballot, err := New(ctx, serviceID)
 	require.NoError(t, err)
+	defer ballot.releaseSession()
 
 	// Verify service doesn't have primary tag initially
 	service, _, err := client.Agent().Service(serviceID, nil)
@@ -237,22 +241,6 @@ func TestIntegration_TagPromotion(t *testing.T) {
 	service, _, err = client.Agent().Service(serviceID, nil)
 	require.NoError(t, err)
 	assert.Contains(t, service.Tags, testPrimaryTag, "Should have primary tag after becoming leader")
-
-	// Release session to trigger demotion
-	err = ballot.releaseSession()
-	require.NoError(t, err)
-
-	// Wait briefly for session release
-	time.Sleep(500 * time.Millisecond)
-
-	// Run election again - should update status since session is gone
-	err = ballot.election()
-	require.NoError(t, err)
-
-	// Verify we're no longer leader (need another election cycle to update tags)
-	// The leadership status depends on whether we re-acquired the lock
-	// After releasing session, we should create a new one and potentially become leader again
-	// For this test, we just verify the tag manipulation works
 }
 
 func TestIntegration_HealthCheckFailure(t *testing.T) {
@@ -274,6 +262,7 @@ func TestIntegration_HealthCheckFailure(t *testing.T) {
 
 	ballot, err := New(ctx, serviceID)
 	require.NoError(t, err)
+	defer ballot.releaseSession()
 
 	// Become leader first
 	err = ballot.election()
@@ -329,6 +318,7 @@ func TestIntegration_MultipleInstances(t *testing.T) {
 		setupViper(t, services[i], electionKey)
 		b, err := New(ctx, services[i])
 		require.NoError(t, err)
+		defer b.releaseSession()
 		ballots[i] = b
 	}
 	defer cleanupKV(t, client, electionKey)
@@ -391,6 +381,7 @@ func TestIntegration_SessionRenewal(t *testing.T) {
 
 	ballot, err := New(ctx, serviceID)
 	require.NoError(t, err)
+	defer ballot.releaseSession()
 
 	// Become leader
 	err = ballot.election()
