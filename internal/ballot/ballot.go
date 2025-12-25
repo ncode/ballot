@@ -767,10 +767,10 @@ func (b *Ballot) releaseSession() error {
 		return nil
 	}
 	sessionID := *sessionIDPtr
-	_, err := b.client.Session().Destroy(sessionID, nil)
-	if err != nil {
-		return err
-	}
+	// Always clear the local session state, even if Destroy fails.
+	// The session may have already been invalidated by Consul (e.g., due to
+	// health check failure), but we should still clear our local state.
 	b.sessionID.Store((*string)(nil))
-	return nil
+	_, err := b.client.Session().Destroy(sessionID, nil)
+	return err
 }
