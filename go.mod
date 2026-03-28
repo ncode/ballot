@@ -1,10 +1,10 @@
 module github.com/ncode/ballot
 
-go 1.25.7
+go 1.25.8
 
 require (
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
-	github.com/hashicorp/consul/api v1.33.4
+	github.com/hashicorp/consul/api v1.33.7
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
@@ -17,7 +17,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/exp v0.0.0-20251219203646-944ab1f22d93 // indirect
+	golang.org/x/exp v0.0.0-20260218203240-3dfff04db8fa // indirect
 )
 
 require (
@@ -43,7 +43,7 @@ require (
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/stretchr/testify v1.11.1
 	github.com/subosito/gotenv v1.6.0 // indirect
-	golang.org/x/sys v0.39.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
