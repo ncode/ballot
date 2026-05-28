@@ -101,8 +101,6 @@ func TestConsulClientAccessors(t *testing.T) {
 }
 
 func TestCopyServiceToRegistration(t *testing.T) {
-	b := &Ballot{}
-
 	t.Run("successful copy", func(t *testing.T) {
 		service := &api.AgentService{
 			ID:      "testID",
@@ -112,7 +110,7 @@ func TestCopyServiceToRegistration(t *testing.T) {
 			Address: "127.0.0.1",
 		}
 
-		registration := b.copyServiceToRegistration(service)
+		registration := copyServiceToRegistration(service)
 
 		assert.Equal(t, service.ID, registration.ID)
 		assert.Equal(t, service.Service, registration.Name)
@@ -122,14 +120,12 @@ func TestCopyServiceToRegistration(t *testing.T) {
 	})
 
 	t.Run("handles nil service gracefully", func(t *testing.T) {
-		registration := b.copyServiceToRegistration(nil)
+		registration := copyServiceToRegistration(nil)
 		assert.Nil(t, registration)
 	})
 }
 
 func TestCopyCatalogServiceToRegistration(t *testing.T) {
-	b := &Ballot{}
-
 	t.Run("successful copy", func(t *testing.T) {
 		service := &api.CatalogService{
 			ID:                       "id",
@@ -144,7 +140,7 @@ func TestCopyCatalogServiceToRegistration(t *testing.T) {
 			ServiceEnableTagOverride: true,
 		}
 
-		registration := b.copyCatalogServiceToRegistration(service)
+		registration := copyCatalogServiceToRegistration(service)
 		assert.Equal(t, service.ID, registration.ID)
 		assert.Equal(t, service.Node, registration.Node)
 		assert.Equal(t, service.ServiceAddress, registration.Address)
@@ -159,7 +155,7 @@ func TestCopyCatalogServiceToRegistration(t *testing.T) {
 	})
 
 	t.Run("handles nil service gracefully", func(t *testing.T) {
-		registration := b.copyCatalogServiceToRegistration(nil)
+		registration := copyCatalogServiceToRegistration(nil)
 		assert.Nil(t, registration)
 	})
 }
@@ -172,86 +168,6 @@ type MockCommandExecutor struct {
 func (m *MockCommandExecutor) CommandContext(ctx context.Context, name string, arg ...string) *exec.Cmd {
 	args := m.Called(ctx, name, arg)
 	return args.Get(0).(*exec.Cmd)
-}
-
-func TestRunCommand(t *testing.T) {
-	t.Run("successful command execution", func(t *testing.T) {
-		// Create a mock CommandExecutor
-		mockExecutor := new(MockCommandExecutor)
-
-		// Create a Ballot instance with the mock executor
-		b := &Ballot{
-			executor: mockExecutor,
-			ctx:      context.Background(),
-		}
-
-		// Define the command to run
-		command := "echo hello"
-		payload := &ElectionPayload{
-			Address:   "127.0.0.1",
-			Port:      8080,
-			SessionID: "session",
-		}
-
-		// Set up the expectation
-		// Here, we're using a command that just outputs "mocked" when run
-		mockCmd := exec.Command("echo", "mocked")
-		mockExecutor.On("CommandContext", mock.Anything, "echo", []string{"hello"}).Return(mockCmd)
-
-		// Call the method under test
-		_, err := b.runCommand(command, payload)
-
-		// Assert that the expectations were met
-		mockExecutor.AssertExpectations(t)
-
-		// Assert that the method did not return an error
-		assert.NoError(t, err)
-	})
-
-	t.Run("empty command returns error", func(t *testing.T) {
-		// Create a mock CommandExecutor
-		mockExecutor := new(MockCommandExecutor)
-
-		// Create a Ballot instance with the mock executor
-		b := &Ballot{
-			executor: mockExecutor,
-			ctx:      context.Background(),
-		}
-
-		// Define an empty command
-		command := ""
-		payload := &ElectionPayload{
-			Address:   "127.0.0.1",
-			Port:      8080,
-			SessionID: "session",
-		}
-
-		// Call the method under test with empty command
-		_, err := b.runCommand(command, payload)
-
-		// Assert that an error is returned for empty command
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "empty command")
-	})
-
-	t.Run("nil context defaults to background", func(t *testing.T) {
-		mockExecutor := new(MockCommandExecutor)
-		b := &Ballot{
-			executor: mockExecutor,
-		}
-		payload := &ElectionPayload{
-			Address:   "127.0.0.1",
-			Port:      8080,
-			SessionID: "session",
-		}
-		mockCmd := exec.Command("echo", "mocked")
-		mockExecutor.On("CommandContext", mock.Anything, "echo", []string{"hello"}).Return(mockCmd)
-
-		_, err := b.runCommand("echo hello", payload)
-
-		assert.NoError(t, err)
-		mockExecutor.AssertExpectations(t)
-	})
 }
 
 func TestIsLeader(t *testing.T) {
@@ -2402,7 +2318,12 @@ func observeHookResult(t *testing.T, b *Ballot) (HookResult, bool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	return b.ObserveHookResult(ctx)
+	select {
+	case result := <-b.hookResultsChan():
+		return result, true
+	case <-ctx.Done():
+		return HookResult{Err: ctx.Err()}, false
+	}
 }
 
 func TestRun_SmallTTL(t *testing.T) {

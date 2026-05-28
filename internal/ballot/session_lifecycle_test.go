@@ -88,9 +88,9 @@ func TestSessionLifecycle(t *testing.T) {
 		require.NoError(t, err)
 
 		select {
-		case event := <-lifecycle.Events():
+		case event := <-lifecycle.events:
 			if event.Type == SessionCreated {
-				event = <-lifecycle.Events()
+				event = <-lifecycle.events
 			}
 			assert.Equal(t, SessionRenewalFailed, event.Type)
 			assert.Equal(t, renewErr, event.Err)

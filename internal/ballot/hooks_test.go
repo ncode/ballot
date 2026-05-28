@@ -131,7 +131,7 @@ func TestLeadershipHooks_Execute(t *testing.T) {
 	})
 }
 
-func TestBallot_ObserveHookResult(t *testing.T) {
+func TestBallot_PublishHookResult(t *testing.T) {
 	t.Run("observes published result", func(t *testing.T) {
 		b := &Ballot{}
 		expected := HookResult{Transition: HookPromote, Command: "echo promoted", Output: []byte("promoted\n")}
@@ -143,17 +143,6 @@ func TestBallot_ObserveHookResult(t *testing.T) {
 		assert.Equal(t, expected.Transition, result.Transition)
 		assert.Equal(t, expected.Command, result.Command)
 		assert.Equal(t, expected.Output, result.Output)
-	})
-
-	t.Run("returns false when context is cancelled", func(t *testing.T) {
-		b := &Ballot{}
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
-		result, ok := b.ObserveHookResult(ctx)
-
-		assert.False(t, ok)
-		assert.ErrorIs(t, result.Err, context.Canceled)
 	})
 
 	t.Run("concurrent publish and observe share one channel", func(t *testing.T) {

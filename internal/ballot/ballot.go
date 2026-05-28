@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -155,39 +154,9 @@ type Ballot struct {
 	sessionLifecycle *SessionLifecycle `mapstructure:"-"`
 }
 
-// Copy *api.AgentService to *api.AgentServiceRegistration
-func (b *Ballot) copyServiceToRegistration(service *api.AgentService) *api.AgentServiceRegistration {
-	return copyServiceToRegistration(service)
-}
-
-// Copy *api.CatalogService to *api.CatalogRegistration
-func (b *Ballot) copyCatalogServiceToRegistration(service *api.CatalogService) *api.CatalogRegistration {
-	return copyCatalogServiceToRegistration(service)
-}
-
 // getService returns the registered service.
 func (b *Ballot) getService() (service *api.AgentService, catalogServices []*api.CatalogService, err error) {
 	return b.interaction().LocalService()
-}
-
-// runCommand runs a command and returns the output.
-func (b *Ballot) runCommand(command string, electionPayload *ElectionPayload) ([]byte, error) {
-	log.WithFields(log.Fields{
-		"caller": "runCommand",
-	}).Info("Running command: ", command)
-	if strings.TrimSpace(command) == "" {
-		return nil, fmt.Errorf("empty command")
-	}
-	ctx := b.ctx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	result := b.leadershipHooks().Execute(ctx, HookRequest{
-		Command: command,
-		Payload: electionPayload,
-		Timeout: HookTimeout(b.TTL, b.LockDelay),
-	})
-	return result.Output, result.Err
 }
 
 // updateServiceTags updates the service tags.
@@ -424,16 +393,6 @@ func (b *Ballot) publishHookResult(result HookResult) {
 	select {
 	case results <- result:
 	default:
-	}
-}
-
-func (b *Ballot) ObserveHookResult(ctx context.Context) (HookResult, bool) {
-	results := b.hookResultsChan()
-	select {
-	case result := <-results:
-		return result, true
-	case <-ctx.Done():
-		return HookResult{Err: ctx.Err()}, false
 	}
 }
 
