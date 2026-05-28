@@ -2,18 +2,15 @@ package ballot
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
-	"slices"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/google/shlex"
 	"github.com/hashicorp/consul/api"
 	log "github.com/sirupsen/logrus"
-	"github.com/spf13/viper"
 )
 
 type CommandExecutor interface {
@@ -25,23 +22,23 @@ type consulClient struct {
 }
 
 func (c *consulClient) Agent() AgentInterface {
-	return &AgentWrapper{agent: c.client.Agent()}
+	return c.client.Agent()
 }
 
 func (c *consulClient) Catalog() CatalogInterface {
-	return &CatalogWrapper{catalog: c.client.Catalog()}
+	return c.client.Catalog()
 }
 
 func (c *consulClient) Health() HealthInterface {
-	return &HealthWrapper{health: c.client.Health()}
+	return c.client.Health()
 }
 
 func (c *consulClient) Session() SessionInterface {
-	return &SessionWrapper{session: c.client.Session()}
+	return c.client.Session()
 }
 
 func (c *consulClient) KV() KVInterface {
-	return &KVWrapper{kv: c.client.KV()}
+	return c.client.KV()
 }
 
 // AgentInterface is an interface that wraps the Consul agent methods.
@@ -50,47 +47,15 @@ type AgentInterface interface {
 	ServiceRegister(service *api.AgentServiceRegistration) error
 }
 
-type AgentWrapper struct {
-	agent AgentInterface
-}
-
-func (a *AgentWrapper) ServiceRegister(service *api.AgentServiceRegistration) error {
-	return a.agent.ServiceRegister(service)
-}
-
-func (a *AgentWrapper) Service(serviceID string, q *api.QueryOptions) (*api.AgentService, *api.QueryMeta, error) {
-	return a.agent.Service(serviceID, q)
-}
-
 // CatalogInterface is an interface that wraps the Consul catalog methods.
 type CatalogInterface interface {
 	Service(serviceName, tag string, q *api.QueryOptions) ([]*api.CatalogService, *api.QueryMeta, error)
 	Register(reg *api.CatalogRegistration, w *api.WriteOptions) (*api.WriteMeta, error)
 }
 
-type CatalogWrapper struct {
-	catalog CatalogInterface
-}
-
-func (c *CatalogWrapper) Service(serviceName, tag string, q *api.QueryOptions) ([]*api.CatalogService, *api.QueryMeta, error) {
-	return c.catalog.Service(serviceName, tag, q)
-}
-
-func (c *CatalogWrapper) Register(reg *api.CatalogRegistration, w *api.WriteOptions) (*api.WriteMeta, error) {
-	return c.catalog.Register(reg, w)
-}
-
 // HealthInterface is an interface that wraps the Consul health methods.
 type HealthInterface interface {
-	Checks(service string, q *api.QueryOptions) ([]*api.HealthCheck, *api.QueryMeta, error)
-}
-
-type HealthWrapper struct {
-	health *api.Health
-}
-
-func (h *HealthWrapper) Checks(service string, q *api.QueryOptions) ([]*api.HealthCheck, *api.QueryMeta, error) {
-	return h.health.Checks(service, q)
+	Checks(service string, q *api.QueryOptions) (api.HealthChecks, *api.QueryMeta, error)
 }
 
 // SessionInterface is an interface that wraps the Consul session methods.
@@ -101,47 +66,11 @@ type SessionInterface interface {
 	RenewPeriodic(initialTTL string, sessionID string, q *api.WriteOptions, doneCh <-chan struct{}) error
 }
 
-type SessionWrapper struct {
-	session SessionInterface
-}
-
-func (s *SessionWrapper) Create(se *api.SessionEntry, q *api.WriteOptions) (string, *api.WriteMeta, error) {
-	return s.session.Create(se, q)
-}
-
-func (s *SessionWrapper) Destroy(sessionID string, q *api.WriteOptions) (*api.WriteMeta, error) {
-	return s.session.Destroy(sessionID, q)
-}
-
-func (s *SessionWrapper) Info(sessionID string, q *api.QueryOptions) (*api.SessionEntry, *api.QueryMeta, error) {
-	return s.session.Info(sessionID, q)
-}
-
-func (s *SessionWrapper) RenewPeriodic(initialTTL string, sessionID string, q *api.WriteOptions, doneCh <-chan struct{}) error {
-	return s.session.RenewPeriodic(initialTTL, sessionID, q, doneCh)
-}
-
 // KVInterface is an interface that wraps the Consul KV methods.
 type KVInterface interface {
 	Get(key string, q *api.QueryOptions) (*api.KVPair, *api.QueryMeta, error)
 	Put(p *api.KVPair, q *api.WriteOptions) (*api.WriteMeta, error)
 	Acquire(p *api.KVPair, q *api.WriteOptions) (bool, *api.WriteMeta, error)
-}
-
-type KVWrapper struct {
-	kv KVInterface
-}
-
-func (k *KVWrapper) Get(key string, q *api.QueryOptions) (*api.KVPair, *api.QueryMeta, error) {
-	return k.kv.Get(key, q)
-}
-
-func (k *KVWrapper) Put(p *api.KVPair, q *api.WriteOptions) (*api.WriteMeta, error) {
-	return k.kv.Put(p, q)
-}
-
-func (k *KVWrapper) Acquire(p *api.KVPair, q *api.WriteOptions) (bool, *api.WriteMeta, error) {
-	return k.kv.Acquire(p, q)
 }
 
 type ConsulClient interface {
@@ -165,135 +94,80 @@ func (c *commandExecutor) CommandContext(ctx context.Context, name string, arg .
 }
 
 // New returns a new Ballot instance.
-func New(ctx context.Context, name string) (*Ballot, error) {
+func New(ctx context.Context, cfg RuntimeConfig) (*Ballot, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("context is required")
 	}
+	if err := validateRuntimeConfig(cfg); err != nil {
+		return nil, err
+	}
 	consulConfig := api.DefaultConfig()
-	consulConfig.Token = viper.GetString("consul.token")
-	consulConfig.Address = viper.GetString("consul.address")
+	consulConfig.Token = cfg.ConsulToken
+	consulConfig.Address = cfg.ConsulAddress
 	client, err := api.NewClient(consulConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	b := &Ballot{}
-	err = viper.UnmarshalKey(fmt.Sprintf("election.services.%s", name), b)
-	if err != nil {
-		return nil, err
+	b := &Ballot{
+		Name:          cfg.Name,
+		ID:            cfg.ID,
+		Key:           cfg.Key,
+		ServiceChecks: cfg.ServiceChecks,
+		Token:         consulConfig.Token,
+		ExecOnPromote: cfg.ExecOnPromote,
+		ExecOnDemote:  cfg.ExecOnDemote,
+		PrimaryTag:    cfg.PrimaryTag,
+		ConsulAddress: consulConfig.Address,
+		TTL:           cfg.TTL,
+		LockDelay:     cfg.LockDelay,
+		client:        &consulClient{client: client},
+		ctx:           ctx,
+		executor:      &commandExecutor{},
 	}
-	b.client = &consulClient{client: client}
 	b.leader.Store(false)
-	b.Token = consulConfig.Token
-	b.ctx = ctx
-	b.executor = &commandExecutor{}
-
-	// Ensure that required fields are set
-	if b.ID == "" {
-		return nil, fmt.Errorf("service ID is required; please set the 'id' field in the configuration")
-	}
-	if b.Key == "" {
-		return nil, fmt.Errorf("key is required; please set the 'key' field in the configuration")
-	}
-	if b.Name == "" {
-		b.Name = name
-	}
-	if b.LockDelay == 0 {
-		b.LockDelay = 3 * time.Second
-	}
-	if b.TTL == 0 {
-		b.TTL = 10 * time.Second
-	}
+	b.hooks = NewLeadershipHooks(b.executor)
 
 	return b, nil
 }
 
 // Ballot is a struct that holds the configuration for the leader election.
 type Ballot struct {
-	Name                 string               `mapstructure:"-"`
-	ID                   string               `mapstructure:"id"`
-	Key                  string               `mapstructure:"key"`
-	ServiceChecks        []string             `mapstructure:"serviceChecks"`
-	Token                string               `mapstructure:"consul.token"`
-	ExecOnPromote        string               `mapstructure:"execOnPromote"`
-	ExecOnDemote         string               `mapstructure:"execOnDemote"`
-	PrimaryTag           string               `mapstructure:"primaryTag"`
-	ConsulAddress        string               `mapstructure:"consul.address"`
-	TTL                  time.Duration        `mapstructure:"ttl"`
-	LockDelay            time.Duration        `mapstructure:"lockDelay"`
-	sessionID            atomic.Value         // stores *string
-	leader               atomic.Bool          `mapstructure:"-"`
-	client               ConsulClient         `mapstructure:"-"`
-	ctx                  context.Context      `mapstructure:"-"`
-	executor             CommandExecutor      `mapstructure:"-"`
-	sessionRenewalCancel context.CancelFunc   `mapstructure:"-"`
+	Name             string            `mapstructure:"-"`
+	ID               string            `mapstructure:"id"`
+	Key              string            `mapstructure:"key"`
+	ServiceChecks    []string          `mapstructure:"serviceChecks"`
+	Token            string            `mapstructure:"consul.token"`
+	ExecOnPromote    string            `mapstructure:"execOnPromote"`
+	ExecOnDemote     string            `mapstructure:"execOnDemote"`
+	PrimaryTag       string            `mapstructure:"primaryTag"`
+	ConsulAddress    string            `mapstructure:"consul.address"`
+	TTL              time.Duration     `mapstructure:"ttl"`
+	LockDelay        time.Duration     `mapstructure:"lockDelay"`
+	sessionID        atomic.Value      // stores *string
+	leader           atomic.Bool       `mapstructure:"-"`
+	client           ConsulClient      `mapstructure:"-"`
+	ctx              context.Context   `mapstructure:"-"`
+	executor         CommandExecutor   `mapstructure:"-"`
+	hooks            *LeadershipHooks  `mapstructure:"-"`
+	hookResultsMu    sync.Mutex        `mapstructure:"-"`
+	hookResults      chan HookResult   `mapstructure:"-"`
+	sessionLifecycle *SessionLifecycle `mapstructure:"-"`
 }
 
 // Copy *api.AgentService to *api.AgentServiceRegistration
 func (b *Ballot) copyServiceToRegistration(service *api.AgentService) *api.AgentServiceRegistration {
-	if service == nil {
-		return nil
-	}
-	return &api.AgentServiceRegistration{
-		ID:      service.ID,
-		Name:    service.Service,
-		Tags:    service.Tags,
-		Port:    service.Port,
-		Address: service.Address,
-		Kind:    service.Kind,
-		Weights: &service.Weights,
-		Meta:    service.Meta,
-	}
+	return copyServiceToRegistration(service)
 }
 
 // Copy *api.CatalogService to *api.CatalogRegistration
 func (b *Ballot) copyCatalogServiceToRegistration(service *api.CatalogService) *api.CatalogRegistration {
-	if service == nil {
-		return nil
-	}
-	return &api.CatalogRegistration{
-		ID:              service.ID,
-		Node:            service.Node,
-		Address:         service.ServiceAddress,
-		TaggedAddresses: service.TaggedAddresses,
-		NodeMeta:        service.NodeMeta,
-		Datacenter:      service.Datacenter,
-		Service: &api.AgentService{
-			ID:              service.ServiceID,
-			Service:         service.ServiceName,
-			Tags:            service.ServiceTags,
-			Meta:            service.ServiceMeta,
-			Port:            service.ServicePort,
-			Address:         service.ServiceAddress,
-			TaggedAddresses: service.ServiceTaggedAddresses,
-			Weights: api.AgentWeights{
-				Passing: service.ServiceWeights.Passing,
-				Warning: service.ServiceWeights.Warning,
-			},
-			EnableTagOverride: service.ServiceEnableTagOverride,
-		},
-	}
+	return copyCatalogServiceToRegistration(service)
 }
 
 // getService returns the registered service.
 func (b *Ballot) getService() (service *api.AgentService, catalogServices []*api.CatalogService, err error) {
-	if b.ID == "" {
-		return nil, nil, fmt.Errorf("service ID is empty; please ensure it is set in the configuration")
-	}
-	agent := b.client.Agent()
-	service, _, err = agent.Service(b.ID, &api.QueryOptions{})
-	if err != nil {
-		return nil, nil, err
-	}
-	if service == nil {
-		return nil, nil, fmt.Errorf("service %s not found", b.ID)
-	}
-	catalog := b.client.Catalog()
-	catalogServices, _, err = catalog.Service(b.Name, b.PrimaryTag, &api.QueryOptions{})
-	if err != nil {
-		return service, nil, err
-	}
-	return service, catalogServices, nil
+	return b.interaction().LocalService()
 }
 
 // runCommand runs a command and returns the output.
@@ -301,232 +175,74 @@ func (b *Ballot) runCommand(command string, electionPayload *ElectionPayload) ([
 	log.WithFields(log.Fields{
 		"caller": "runCommand",
 	}).Info("Running command: ", command)
-	args, err := shlex.Split(command)
-	if err != nil {
-		return nil, err
-	}
-	if len(args) == 0 {
+	if strings.TrimSpace(command) == "" {
 		return nil, fmt.Errorf("empty command")
 	}
-	cmd := b.executor.CommandContext(b.ctx, args[0], args[1:]...)
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("ADDRESS=%s", electionPayload.Address),
-		fmt.Sprintf("PORT=%d", electionPayload.Port),
-		fmt.Sprintf("SESSIONID=%s", electionPayload.SessionID),
-	)
-	return cmd.CombinedOutput()
+	ctx := b.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	result := b.leadershipHooks().Execute(ctx, HookRequest{
+		Command: command,
+		Payload: electionPayload,
+		Timeout: HookTimeout(b.TTL, b.LockDelay),
+	})
+	return result.Output, result.Err
 }
 
 // updateServiceTags updates the service tags.
 func (b *Ballot) updateServiceTags(isLeader bool) error {
-	service, _, err := b.getService()
+	changed, err := b.interaction().ApplyPrimaryTag(isLeader)
 	if err != nil {
 		return err
 	}
-
-	// Get a copy of the current service registration
-	registration := b.copyServiceToRegistration(service)
-	if registration == nil {
-		return fmt.Errorf("service registration is nil")
-	}
-
-	// Determine if the primary tag is already present
-	hasPrimaryTag := slices.Contains(registration.Tags, b.PrimaryTag)
-
-	// Update tags based on leadership status
-	if isLeader && !hasPrimaryTag {
-		// Add primary tag if not present and this node is the leader
-		registration.Tags = append(slices.Clone(registration.Tags), b.PrimaryTag)
-	} else if !isLeader && hasPrimaryTag {
-		// Remove primary tag if present and this node is not the leader
-		index := slices.Index(registration.Tags, b.PrimaryTag)
-		registration.Tags = slices.Delete(slices.Clone(registration.Tags), index, index+1)
-	} else {
-		// No changes needed
+	if !changed {
 		return nil
 	}
 
-	// Run the command associated with the new leadership status
 	var command string
 	if isLeader {
 		command = b.ExecOnPromote
 	} else {
 		command = b.ExecOnDemote
 	}
-	if command != "" && b.executor != nil {
-		go func(isLeader bool, command string) {
-			defer func() {
-				if r := recover(); r != nil {
-					log.WithFields(log.Fields{
-						"caller": "updateServiceTags",
-						"error":  r,
-					}).Error("Recovered from panic in command execution")
-				}
-			}()
-
-			// Run the command in a separate goroutine
-			ctx, cancel := context.WithTimeout(b.ctx, (b.TTL+b.LockDelay)*2)
-			defer cancel()
-			payload, payloadErr := b.waitForNextValidSessionData(ctx)
-			if payloadErr != nil {
-				log.WithFields(log.Fields{
-					"caller": "updateServiceTags",
-					"error":  payloadErr,
-				}).Error("Failed to get session data")
-				return
-			}
-			output, cmdErr := b.runCommand(command, payload)
-			if cmdErr != nil {
-				log.WithFields(log.Fields{
-					"caller":   "updateServiceTags",
-					"isLeader": isLeader,
-					"error":    cmdErr,
-				}).Error("Failed to run command")
-			} else {
-				log.WithFields(log.Fields{
-					"caller":   "updateServiceTags",
-					"isLeader": isLeader,
-					"output":   string(output),
-				}).Info("Ran command")
-			}
-		}(isLeader, command)
-	}
-
-	// Log the updated tags
-	log.WithFields(log.Fields{
-		"caller":  "updateServiceTags",
-		"service": b.ID,
-		"tags":    registration.Tags,
-	}).Debug("Updated service tags")
-
-	// Update the service registration with new tags
-	agent := b.client.Agent()
-	return agent.ServiceRegister(registration)
-}
-
-// cleanup is called by the winning service to ensure that the primary tag is removed from all other instances of the service.
-func (b *Ballot) cleanup(payload *ElectionPayload) error {
-	if !b.IsLeader() {
-		// If this instance is not the leader, do not perform cleanup
+	if command == "" || b.executor == nil {
 		return nil
 	}
-
-	catalogServices, _, err := b.client.Catalog().Service(b.Name, "", nil)
-	if err != nil {
-		return fmt.Errorf("failed to retrieve services from the catalog: %s", err)
-	}
-
-	for _, service := range catalogServices {
-		// Skip cleaning up the leader's own service
-		if service.ServiceAddress == payload.Address && service.ServicePort == payload.Port {
-			continue
-		}
-
-		// Check if the primary tag is present
-		primaryTagIndex := slices.Index(service.ServiceTags, b.PrimaryTag)
-		if primaryTagIndex != -1 {
-			// Remove the primary tag (clone to avoid mutating original slice)
-			updatedTags := slices.Delete(slices.Clone(service.ServiceTags), primaryTagIndex, primaryTagIndex+1)
-
-			// Prepare the catalog registration for update
-			catalogRegistration := b.copyCatalogServiceToRegistration(service)
-			if catalogRegistration == nil || catalogRegistration.Service == nil {
-				continue
-			}
-			catalogRegistration.Service.Tags = updatedTags
-
-			// Update the catalog service
-			_, err := b.client.Catalog().Register(catalogRegistration, nil)
-			if err != nil {
-				return fmt.Errorf("failed to update service tags in the catalog: %s", err)
-			}
-
-			log.WithFields(log.Fields{
-				"caller":  "cleanup",
-				"service": service.ServiceID,
-				"node":    service.Node,
-				"tags":    updatedTags,
-			}).Info("Cleaned up primary tag from service")
-		}
+	result := b.executeLeadershipHook(isLeader, command)
+	if result.Err != nil {
+		log.WithFields(log.Fields{
+			"caller":   "updateServiceTags",
+			"isLeader": isLeader,
+			"error":    result.Err,
+		}).Error("Failed to run command")
+	} else if !result.Skipped {
+		log.WithFields(log.Fields{
+			"caller":   "updateServiceTags",
+			"isLeader": isLeader,
+			"output":   string(result.Output),
+		}).Info("Ran command")
 	}
 	return nil
 }
 
+// cleanup is called by the winning service to ensure that the primary tag is removed from all other instances of the service.
+func (b *Ballot) cleanup(payload *ElectionPayload) error {
+	return b.interaction().CleanupStalePrimaryTags(payload, b.IsLeader())
+}
+
 // election is the main logic for the leader election.
 func (b *Ballot) election() error {
-	err := b.handleServiceCriticalState()
-	if err != nil {
-		return err
-	}
-
-	service, _, err := b.getService()
-	if err != nil {
-		return fmt.Errorf("failed to get service: %s", err)
-	}
-
-	// Session validation and renewal
-	err = b.session()
-	if err != nil {
-		return fmt.Errorf("failed to create session: %s", err)
-	}
-
-	// Prepare the election payload
-	sessionIDPtr, ok := b.getSessionID()
-	if !ok || sessionIDPtr == nil {
-		return fmt.Errorf("session ID is nil")
-	}
-	electionPayload := &ElectionPayload{
-		Address:   service.Address,
-		Port:      service.Port,
-		SessionID: *sessionIDPtr,
-	}
-
-	// Attempt to acquire leadership
-	if !b.leader.Load() && sessionIDPtr != nil {
-		acquired, _, err := b.attemptLeadershipAcquisition(electionPayload)
-		if err != nil {
-			return fmt.Errorf("failed to acquire lock: %s", err)
-		}
-		if acquired {
-			log.WithFields(log.Fields{
-				"caller": "election",
-			}).Info("Acquired leadership")
-		}
-	}
-
-	err = b.cleanup(electionPayload)
-	if err != nil {
-		return fmt.Errorf("failed to cleanup: %s", err)
-	}
-
-	// Check leadership status and respond accordingly
-	return b.verifyAndUpdateLeadershipStatus()
+	return NewElectionStep(b).Run().Err
 }
 
 // attemptLeadershipAcquisition attempts to acquire leadership.
 func (b *Ballot) attemptLeadershipAcquisition(electionPayload *ElectionPayload) (bool, *api.WriteMeta, error) {
-	payload, err := json.Marshal(electionPayload)
-	if err != nil {
-		return false, nil, fmt.Errorf("failed to marshal election payload: %s", err)
-	}
-
 	sessionIDPtr, ok := b.getSessionID()
 	if !ok || sessionIDPtr == nil {
 		return false, nil, fmt.Errorf("session ID is nil")
 	}
-
-	content := &api.KVPair{
-		Key:     b.Key,
-		Session: *sessionIDPtr,
-		Value:   payload,
-	}
-
-	acquired, meta, err := b.client.KV().Acquire(content, nil)
-	if err != nil {
-		return false, meta, err
-	}
-
-	return acquired, meta, nil
+	return b.interaction().AcquireLeadership(electionPayload, *sessionIDPtr)
 }
 
 // verifyAndUpdateLeadershipStatus checks the current session data and updates the leadership status.
@@ -598,30 +314,10 @@ func (b *Ballot) updateLeadershipStatus(isLeader bool) error {
 
 // handleServiceCriticalState is called when the service is in a critical state.
 func (b *Ballot) handleServiceCriticalState() error {
-	healthChecks, _, err := b.client.Health().Checks(b.Name, nil)
+	state, err := b.interaction().HealthState()
 	if err != nil {
-		return fmt.Errorf("failed to get health checks: %s", err)
+		return err
 	}
-
-	// Determine the aggregate status, filtering to only this instance's checks
-	state := "passing"
-	for _, check := range healthChecks {
-		// Only consider checks for this specific service instance
-		if check.ServiceID != b.ID {
-			continue
-		}
-		// If ServiceChecks is configured, only consider those specific checks
-		if len(b.ServiceChecks) > 0 && !slices.Contains(b.ServiceChecks, check.CheckID) {
-			continue
-		}
-		if check.Status == "critical" {
-			state = "critical"
-			break
-		} else if check.Status == "warning" {
-			state = "warning"
-		}
-	}
-
 	if state == "critical" {
 		err := b.releaseSession()
 		if err != nil {
@@ -641,70 +337,8 @@ func (b *Ballot) session() error {
 	if b.client == nil {
 		return fmt.Errorf("consul client is required")
 	}
-	sessionIDPtr, ok := b.getSessionID()
-	if ok && sessionIDPtr != nil {
-		currentSessionID := *sessionIDPtr
-		sessionInfo, _, err := b.client.Session().Info(currentSessionID, nil)
-		if err != nil {
-			return err
-		}
-		if sessionInfo != nil {
-			log.WithFields(log.Fields{
-				"caller":  "session",
-				"session": currentSessionID,
-			}).Trace("Returning cached session")
-			return nil
-		}
-	}
-
-	// Cancel the previous session renewal goroutine if it exists
-	if b.sessionRenewalCancel != nil {
-		b.sessionRenewalCancel()
-	}
-
-	log.WithFields(log.Fields{
-		"caller": "session",
-	}).Trace("Creating new session")
-	sessionID, _, err := b.client.Session().Create(&api.SessionEntry{
-		Behavior:  "delete",
-		Checks:    append(slices.Clone(b.ServiceChecks), "serfHealth"),
-		TTL:       b.TTL.String(),
-		LockDelay: b.LockDelay,
-	}, nil)
-	if err != nil {
-		return err
-	}
-
-	log.WithFields(log.Fields{
-		"caller": "session",
-		"ID":     sessionID,
-	}).Trace("Storing session ID")
-	b.sessionID.Store(&sessionID)
-
-	// Create a cancellable context for the renewal goroutine
-	renewCtx, renewCancel := context.WithCancel(b.ctx)
-	b.sessionRenewalCancel = renewCancel
-
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.WithFields(log.Fields{
-					"caller": "session",
-					"error":  r,
-				}).Error("Recovered from panic in session renewal")
-			}
-		}()
-
-		err := b.client.Session().RenewPeriodic(b.TTL.String(), sessionID, nil, renewCtx.Done())
-		if err != nil {
-			log.WithFields(log.Fields{
-				"caller": "session",
-				"error":  err,
-			}).Warning("Failed to renew session")
-			b.sessionID.Store((*string)(nil))
-		}
-	}()
-	return nil
+	_, err := b.lifecycle().ActiveSession()
+	return err
 }
 
 func (b *Ballot) getSessionID() (*string, bool) {
@@ -714,6 +348,102 @@ func (b *Ballot) getSessionID() (*string, bool) {
 	}
 	sessionIDPtr, ok := sessionIDValue.(*string)
 	return sessionIDPtr, ok
+}
+
+func (b *Ballot) runtimeConfig() RuntimeConfig {
+	return RuntimeConfig{
+		Name:          b.Name,
+		ID:            b.ID,
+		Key:           b.Key,
+		ServiceChecks: b.ServiceChecks,
+		ConsulToken:   b.Token,
+		ExecOnPromote: b.ExecOnPromote,
+		ExecOnDemote:  b.ExecOnDemote,
+		PrimaryTag:    b.PrimaryTag,
+		ConsulAddress: b.ConsulAddress,
+		TTL:           b.TTL,
+		LockDelay:     b.LockDelay,
+	}
+}
+
+func (b *Ballot) interaction() *ConsulElectionInteraction {
+	return NewConsulElectionInteraction(b.client, b.runtimeConfig())
+}
+
+func (b *Ballot) lifecycle() *SessionLifecycle {
+	if b.sessionLifecycle == nil {
+		b.sessionLifecycle = NewSessionLifecycle(b.ctx, b.client.Session(), &b.sessionID, b.runtimeConfig())
+	}
+	return b.sessionLifecycle
+}
+
+func (b *Ballot) leadershipHooks() *LeadershipHooks {
+	if b.hooks == nil {
+		b.hooks = NewLeadershipHooks(b.executor)
+	}
+	return b.hooks
+}
+
+func (b *Ballot) executeLeadershipHook(isLeader bool, command string) HookResult {
+	transition := HookDemote
+	if isLeader {
+		transition = HookPromote
+	}
+
+	baseCtx := b.ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(baseCtx, HookTimeout(b.TTL, b.LockDelay))
+	defer cancel()
+
+	payload, err := b.waitForNextValidSessionData(ctx)
+	if err != nil {
+		result := HookResult{
+			Transition: transition,
+			Command:    command,
+			Err:        err,
+			TimedOut:   ctx.Err() == context.DeadlineExceeded,
+		}
+		b.publishHookResult(result)
+		return result
+	}
+
+	result := b.leadershipHooks().Execute(baseCtx, HookRequest{
+		Transition: transition,
+		Command:    command,
+		Payload:    payload,
+		Timeout:    HookTimeout(b.TTL, b.LockDelay),
+	})
+	b.publishHookResult(result)
+	return result
+}
+
+func (b *Ballot) publishHookResult(result HookResult) {
+	results := b.hookResultsChan()
+	select {
+	case results <- result:
+	default:
+	}
+}
+
+func (b *Ballot) ObserveHookResult(ctx context.Context) (HookResult, bool) {
+	results := b.hookResultsChan()
+	select {
+	case result := <-results:
+		return result, true
+	case <-ctx.Done():
+		return HookResult{Err: ctx.Err()}, false
+	}
+}
+
+func (b *Ballot) hookResultsChan() chan HookResult {
+	b.hookResultsMu.Lock()
+	defer b.hookResultsMu.Unlock()
+	if b.hookResults == nil {
+		b.hookResults = make(chan HookResult, 8)
+	}
+	return b.hookResults
 }
 
 func (b *Ballot) IsLeader() bool {
@@ -728,15 +458,15 @@ func (b *Ballot) waitForNextValidSessionData(ctx context.Context) (*ElectionPayl
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for {
+		data, err := b.getSessionData()
+		if err != nil {
+			return data, err
+		}
+		if data != nil {
+			return data, nil
+		}
 		select {
 		case <-ticker.C:
-			data, err := b.getSessionData()
-			if err != nil {
-				return data, err
-			}
-			if data != nil {
-				return data, nil
-			}
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -744,32 +474,19 @@ func (b *Ballot) waitForNextValidSessionData(ctx context.Context) (*ElectionPayl
 }
 
 func (b *Ballot) getSessionData() (*ElectionPayload, error) {
-	sessionKey, _, err := b.client.KV().Get(b.Key, nil)
-	if err != nil {
-		return nil, err
-	}
-	if sessionKey == nil {
-		return nil, nil
-	}
-	var data *ElectionPayload
-	err = json.Unmarshal(sessionKey.Value, &data)
-	if err != nil {
-		return nil, err
-	}
-
-	return data, nil
+	return b.interaction().LockPayload()
 }
 
 // releaseSession releases the session.
 func (b *Ballot) releaseSession() error {
+	if b.sessionLifecycle != nil {
+		return b.sessionLifecycle.Release()
+	}
 	sessionIDPtr, ok := b.getSessionID()
 	if !ok || sessionIDPtr == nil {
 		return nil
 	}
 	sessionID := *sessionIDPtr
-	// Always clear the local session state, even if Destroy fails.
-	// The session may have already been invalidated by Consul (e.g., due to
-	// health check failure), but we should still clear our local state.
 	b.sessionID.Store((*string)(nil))
 	_, err := b.client.Session().Destroy(sessionID, nil)
 	return err

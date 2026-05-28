@@ -54,7 +54,11 @@ func runElectionWithContext(ctx context.Context) error {
 	errCh := make(chan error, len(enabledServices))
 
 	for _, name := range enabledServices {
-		b, err := ballot.New(ctx, name)
+		cfg, err := runtimeConfigFromViper(name)
+		if err != nil {
+			return fmt.Errorf("failed to load configuration for service %s: %w", name, err)
+		}
+		b, err := ballot.New(ctx, cfg)
 		if err != nil {
 			return fmt.Errorf("failed to create ballot for service %s: %w", name, err)
 		}
