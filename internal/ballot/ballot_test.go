@@ -11,70 +11,61 @@ import (
 	"time"
 
 	"github.com/hashicorp/consul/api"
-	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
 
 func TestNew(t *testing.T) {
-	t.Run("successful new", func(t *testing.T) {
-		// Set up the necessary configuration
-		viper.Set("election.services.test.id", "test_service_id")
-		viper.Set("election.services.test.key", "election/test_service/leader")
-		viper.Set("election.services.test.primaryTag", "primary")
-		viper.Set("election.services.test.serviceChecks", []string{"service:test_service_id"})
-		viper.Set("election.services.test.execOnPromote", "echo Promoted to leader")
-		viper.Set("election.services.test.execOnDemote", "echo Demoted from leader")
-		viper.Set("election.services.test.ttl", "10s")
-		viper.Set("election.services.test.lockDelay", "3s")
-
-		// Ensure viper configuration is reset after the test
-		defer func() {
-			viper.Reset()
-		}()
-
-		// Call the New function
-		b, err := New(context.Background(), "test")
+	t.Run("successful new from runtime config", func(t *testing.T) {
+		b, err := New(context.Background(), RuntimeConfig{
+			Name:          "test",
+			ID:            "test_service_id",
+			Key:           "election/test_service/leader",
+			PrimaryTag:    "primary",
+			ServiceChecks: []string{"service:test_service_id"},
+			ExecOnPromote: "echo Promoted to leader",
+			ExecOnDemote:  "echo Demoted from leader",
+			TTL:           10 * time.Second,
+			LockDelay:     3 * time.Second,
+		})
 		assert.NoError(t, err)
 		assert.NotNil(t, b)
-
-		// Verify that the Ballot instance has the expected values
 		assert.Equal(t, "test_service_id", b.ID)
 		assert.Equal(t, "election/test_service/leader", b.Key)
 		assert.Equal(t, "primary", b.PrimaryTag)
 	})
 
 	t.Run("failure due to nil context", func(t *testing.T) {
-		b, err := New(nil, "test")
+		b, err := New(nil, RuntimeConfig{
+			Name:      "test",
+			ID:        "test_service_id",
+			Key:       "election/test_service/leader",
+			TTL:       10 * time.Second,
+			LockDelay: 3 * time.Second,
+		})
 		assert.Error(t, err)
 		assert.Nil(t, b)
 	})
 
 	t.Run("failure due to missing key", func(t *testing.T) {
-		// Set up configuration without the key field
-		viper.Set("election.services.nokey.id", "test_service_id")
-		viper.Set("election.services.nokey.primaryTag", "primary")
-
-		defer func() {
-			viper.Reset()
-		}()
-
-		b, err := New(context.Background(), "nokey")
+		b, err := New(context.Background(), RuntimeConfig{
+			Name:      "nokey",
+			ID:        "test_service_id",
+			TTL:       10 * time.Second,
+			LockDelay: 3 * time.Second,
+		})
 		assert.Error(t, err)
 		assert.Nil(t, b)
 		assert.Contains(t, err.Error(), "key is required")
 	})
 
 	t.Run("failure due to missing id", func(t *testing.T) {
-		// Set up configuration without the id field
-		viper.Set("election.services.noid.key", "election/test/leader")
-		viper.Set("election.services.noid.primaryTag", "primary")
-
-		defer func() {
-			viper.Reset()
-		}()
-
-		b, err := New(context.Background(), "noid")
+		b, err := New(context.Background(), RuntimeConfig{
+			Name:      "noid",
+			Key:       "election/test/leader",
+			TTL:       10 * time.Second,
+			LockDelay: 3 * time.Second,
+		})
 		assert.Error(t, err)
 		assert.Nil(t, b)
 		assert.Contains(t, err.Error(), "service ID is required")
@@ -177,7 +168,7 @@ func TestRunCommand(t *testing.T) {
 		// Set up the expectation
 		// Here, we're using a command that just outputs "mocked" when run
 		mockCmd := exec.Command("echo", "mocked")
-		mockExecutor.On("CommandContext", b.ctx, "echo", []string{"hello"}).Return(mockCmd)
+		mockExecutor.On("CommandContext", mock.Anything, "echo", []string{"hello"}).Return(mockCmd)
 
 		// Call the method under test
 		_, err := b.runCommand(command, payload)
@@ -461,8 +452,7 @@ func TestSession(t *testing.T) {
 		assert.True(t, ok)
 		assert.Equal(t, firstSessionID, *storedSessionID)
 
-		// Verify sessionRenewalCancel is set
-		assert.NotNil(t, b.sessionRenewalCancel)
+		assert.NotNil(t, b.sessionLifecycle)
 
 		// Create second session - should cancel the first renewal
 		err = b.session()
@@ -1477,6 +1467,7 @@ func TestElection(t *testing.T) {
 		// Mock Catalog
 		mockCatalog := new(MockCatalog)
 		mockCatalog.On("Service", b.Name, b.PrimaryTag, mock.Anything).Return([]*api.CatalogService{}, nil, nil)
+		mockCatalog.On("Service", b.Name, "", mock.Anything).Return([]*api.CatalogService{}, nil, nil)
 		mockCatalog.On("Register", mock.Anything, mock.Anything).Return(nil, nil)
 
 		// Set up the mock client
@@ -1499,423 +1490,6 @@ func TestElection(t *testing.T) {
 		// Verify that b.IsLeader() returns true
 		assert.True(t, b.IsLeader(), "Expected b.IsLeader() to return true after successful election")
 	})
-}
-
-func TestAgentWrapper_ServiceRegister(t *testing.T) {
-	// Arrange
-	mockAgent := new(MockAgent)
-	agentWrapper := &AgentWrapper{agent: mockAgent}
-
-	serviceReg := &api.AgentServiceRegistration{
-		Name: "test_service",
-	}
-
-	expectedErr := errors.New("registration error")
-	mockAgent.On("ServiceRegister", serviceReg).Return(expectedErr)
-
-	// Act
-	err := agentWrapper.ServiceRegister(serviceReg)
-
-	// Assert
-	assert.Equal(t, expectedErr, err)
-	mockAgent.AssertCalled(t, "ServiceRegister", serviceReg)
-}
-
-func TestAgentWrapper_Service(t *testing.T) {
-	// Arrange
-	mockAgent := new(MockAgent)
-	agentWrapper := &AgentWrapper{agent: mockAgent}
-
-	serviceID := "test_service_id"
-	queryOptions := &api.QueryOptions{}
-
-	expectedService := &api.AgentService{ID: serviceID}
-	expectedMeta := &api.QueryMeta{}
-	expectedErr := errors.New("service error")
-
-	mockAgent.On("Service", serviceID, queryOptions).Return(expectedService, expectedMeta, expectedErr)
-
-	// Act
-	service, meta, err := agentWrapper.Service(serviceID, queryOptions)
-
-	// Assert
-	assert.Equal(t, expectedService, service)
-	assert.Equal(t, expectedMeta, meta)
-	assert.Equal(t, expectedErr, err)
-	mockAgent.AssertCalled(t, "Service", serviceID, queryOptions)
-}
-
-func TestCatalogWrapper_Service(t *testing.T) {
-	// Arrange
-	mockCatalog := new(MockCatalog)
-	catalogWrapper := &CatalogWrapper{catalog: mockCatalog}
-
-	serviceName := "test_service"
-	tag := "test_tag"
-	queryOptions := &api.QueryOptions{}
-
-	expectedServices := []*api.CatalogService{
-		{ServiceName: serviceName},
-	}
-	expectedMeta := &api.QueryMeta{}
-	expectedErr := errors.New("catalog service error")
-
-	mockCatalog.On("Service", serviceName, tag, queryOptions).Return(expectedServices, expectedMeta, expectedErr)
-
-	// Act
-	services, meta, err := catalogWrapper.Service(serviceName, tag, queryOptions)
-
-	// Assert
-	assert.Equal(t, expectedServices, services)
-	assert.Equal(t, expectedMeta, meta)
-	assert.Equal(t, expectedErr, err)
-	mockCatalog.AssertCalled(t, "Service", serviceName, tag, queryOptions)
-}
-
-func TestCatalogWrapper_Register(t *testing.T) {
-	// Arrange
-	mockCatalog := new(MockCatalog)
-	catalogWrapper := &CatalogWrapper{catalog: mockCatalog}
-
-	registration := &api.CatalogRegistration{}
-	writeOptions := &api.WriteOptions{}
-
-	expectedMeta := &api.WriteMeta{}
-	expectedErr := errors.New("register error")
-
-	mockCatalog.On("Register", registration, writeOptions).Return(expectedMeta, expectedErr)
-
-	// Act
-	meta, err := catalogWrapper.Register(registration, writeOptions)
-
-	// Assert
-	assert.Equal(t, expectedMeta, meta)
-	assert.Equal(t, expectedErr, err)
-	mockCatalog.AssertCalled(t, "Register", registration, writeOptions)
-}
-
-func TestSessionWrapper_Create(t *testing.T) {
-	// Arrange
-	mockSession := new(MockSession)
-	sessionWrapper := &SessionWrapper{session: mockSession}
-
-	sessionEntry := &api.SessionEntry{}
-	writeOptions := &api.WriteOptions{}
-
-	expectedID := "session_id"
-	expectedMeta := &api.WriteMeta{}
-	expectedErr := errors.New("session create error")
-
-	mockSession.On("Create", sessionEntry, writeOptions).Return(expectedID, expectedMeta, expectedErr)
-
-	// Act
-	sessionID, meta, err := sessionWrapper.Create(sessionEntry, writeOptions)
-
-	// Assert
-	assert.Equal(t, expectedID, sessionID)
-	assert.Equal(t, expectedMeta, meta)
-	assert.Equal(t, expectedErr, err)
-	mockSession.AssertCalled(t, "Create", sessionEntry, writeOptions)
-}
-
-func TestSessionWrapper_RenewPeriodic(t *testing.T) {
-	// Arrange
-	mockSession := new(MockSession)
-	sessionWrapper := &SessionWrapper{session: mockSession}
-
-	initialTTL := "15s"
-	sessionID := "session_id"
-	writeOptions := &api.WriteOptions{}
-	doneCh := make(chan struct{})
-	// Convert to receive-only channel
-	var receiveOnlyDoneCh <-chan struct{} = doneCh
-
-	expectedErr := errors.New("renew error")
-
-	mockSession.On("RenewPeriodic", initialTTL, sessionID, writeOptions, receiveOnlyDoneCh).Return(expectedErr)
-
-	// Act
-	err := sessionWrapper.RenewPeriodic(initialTTL, sessionID, writeOptions, receiveOnlyDoneCh)
-
-	// Assert
-	assert.Equal(t, expectedErr, err)
-	mockSession.AssertCalled(t, "RenewPeriodic", initialTTL, sessionID, writeOptions, receiveOnlyDoneCh)
-}
-
-func TestKVWrapper_Get(t *testing.T) {
-	// Arrange
-	mockKV := new(MockKV)
-	kvWrapper := &KVWrapper{kv: mockKV}
-
-	key := "test_key"
-	queryOptions := &api.QueryOptions{}
-
-	expectedKVPair := &api.KVPair{Key: key}
-	expectedMeta := &api.QueryMeta{}
-	expectedErr := errors.New("get error")
-
-	mockKV.On("Get", key, queryOptions).Return(expectedKVPair, expectedMeta, expectedErr)
-
-	// Act
-	kvPair, meta, err := kvWrapper.Get(key, queryOptions)
-
-	// Assert
-	assert.Equal(t, expectedKVPair, kvPair)
-	assert.Equal(t, expectedMeta, meta)
-	assert.Equal(t, expectedErr, err)
-	mockKV.AssertCalled(t, "Get", key, queryOptions)
-}
-
-func TestKVWrapper_Acquire(t *testing.T) {
-	// Arrange
-	mockKV := new(MockKV)
-	kvWrapper := &KVWrapper{kv: mockKV}
-
-	kvPair := &api.KVPair{Key: "test_key"}
-	writeOptions := &api.WriteOptions{}
-
-	expectedSuccess := true
-	expectedMeta := &api.WriteMeta{}
-	expectedErr := errors.New("acquire error")
-
-	mockKV.On("Acquire", kvPair, writeOptions).Return(expectedSuccess, expectedMeta, expectedErr)
-
-	// Act
-	success, meta, err := kvWrapper.Acquire(kvPair, writeOptions)
-
-	// Assert
-	assert.Equal(t, expectedSuccess, success)
-	assert.Equal(t, expectedMeta, meta)
-	assert.Equal(t, expectedErr, err)
-	mockKV.AssertCalled(t, "Acquire", kvPair, writeOptions)
-}
-
-// MockConsulClient is a mock implementation of the api.Client interface
-type MockConsulClient struct {
-	mock.Mock
-}
-
-func (m *MockConsulClient) Agent() AgentInterface {
-	args := m.Called()
-	return args.Get(0).(AgentInterface)
-}
-
-func (m *MockConsulClient) Catalog() CatalogInterface {
-	args := m.Called()
-	return args.Get(0).(CatalogInterface)
-}
-
-func (m *MockConsulClient) Health() HealthInterface {
-	args := m.Called()
-	return args.Get(0).(HealthInterface)
-}
-
-func (m *MockConsulClient) KV() KVInterface {
-	args := m.Called()
-	return args.Get(0).(KVInterface)
-}
-
-func (m *MockConsulClient) Session() SessionInterface {
-	args := m.Called()
-	return args.Get(0).(SessionInterface)
-}
-
-// MockAgent is a mock implementation of the api.Agent interface
-type MockAgent struct {
-	mock.Mock
-}
-
-func (m *MockAgent) Service(serviceID string, q *api.QueryOptions) (*api.AgentService, *api.QueryMeta, error) {
-	args := m.Called(serviceID, q)
-	var service *api.AgentService
-	if args.Get(0) != nil {
-		service = args.Get(0).(*api.AgentService)
-	}
-	var meta *api.QueryMeta
-	if args.Get(1) != nil {
-		meta = args.Get(1).(*api.QueryMeta)
-	}
-	return service, meta, args.Error(2)
-}
-
-func (m *MockAgent) ServiceRegister(service *api.AgentServiceRegistration) error {
-	args := m.Called(service)
-	return args.Error(0)
-}
-
-func (m *MockAgent) ServiceDeregister(serviceID string) error {
-	args := m.Called(serviceID)
-	return args.Error(0)
-}
-
-// MockCatalog is a mock implementation of the api.Catalog interface
-type MockCatalog struct {
-	mock.Mock
-}
-
-func (m *MockCatalog) Service(serviceName, tag string, q *api.QueryOptions) ([]*api.CatalogService, *api.QueryMeta, error) {
-	args := m.Called(serviceName, tag, q)
-	var services []*api.CatalogService
-	if args.Get(0) != nil {
-		services = args.Get(0).([]*api.CatalogService)
-	}
-	var meta *api.QueryMeta
-	if args.Get(1) != nil {
-		meta = args.Get(1).(*api.QueryMeta)
-	}
-	return services, meta, args.Error(2)
-}
-
-func (m *MockCatalog) Register(reg *api.CatalogRegistration, w *api.WriteOptions) (*api.WriteMeta, error) {
-	args := m.Called(reg, w)
-	var meta *api.WriteMeta
-	if args.Get(0) != nil {
-		meta = args.Get(0).(*api.WriteMeta)
-	}
-	return meta, args.Error(1)
-}
-
-func (m *MockCatalog) Deregister(dereg *api.CatalogDeregistration, w *api.WriteOptions) (*api.WriteMeta, error) {
-	args := m.Called(dereg, w)
-	var meta *api.WriteMeta
-	if args.Get(0) != nil {
-		meta = args.Get(0).(*api.WriteMeta)
-	}
-	return meta, args.Error(1)
-}
-
-// MockSession is a mock implementation of the api.Session interface
-type MockSession struct {
-	mock.Mock
-}
-
-func (m *MockSession) Create(se *api.SessionEntry, q *api.WriteOptions) (string, *api.WriteMeta, error) {
-	args := m.Called(se, q)
-	sessionID := args.String(0)
-	var meta *api.WriteMeta
-	if args.Get(1) != nil {
-		meta = args.Get(1).(*api.WriteMeta)
-	}
-	return sessionID, meta, args.Error(2)
-}
-
-func (m *MockSession) Destroy(sessionID string, q *api.WriteOptions) (*api.WriteMeta, error) {
-	args := m.Called(sessionID, q)
-	var meta *api.WriteMeta
-	if args.Get(0) != nil {
-		meta = args.Get(0).(*api.WriteMeta)
-	}
-	return meta, args.Error(1)
-}
-
-func (m *MockSession) Info(sessionID string, q *api.QueryOptions) (*api.SessionEntry, *api.QueryMeta, error) {
-	args := m.Called(sessionID, q)
-	return args.Get(0).(*api.SessionEntry), args.Get(1).(*api.QueryMeta), args.Error(2)
-}
-
-func (m *MockSession) RenewPeriodic(initialTTL string, id string, q *api.WriteOptions, doneCh <-chan struct{}) error {
-	args := m.Called(initialTTL, id, q, doneCh)
-	return args.Error(0)
-}
-
-// MockHealth is a mock implementation of the api.Health interface
-type MockHealth struct {
-	mock.Mock
-}
-
-func (m *MockHealth) Checks(service string, q *api.QueryOptions) ([]*api.HealthCheck, *api.QueryMeta, error) {
-	args := m.Called(service, q)
-	checks, _ := args.Get(0).([]*api.HealthCheck)
-	meta, _ := args.Get(1).(*api.QueryMeta)
-	return checks, meta, args.Error(2)
-}
-
-// MockKV is a mock implementation of the api.KV interface
-type MockKV struct {
-	mock.Mock
-}
-
-func (m *MockKV) Get(key string, q *api.QueryOptions) (*api.KVPair, *api.QueryMeta, error) {
-	args := m.Called(key, q)
-	pair, _ := args.Get(0).(*api.KVPair)
-	meta, _ := args.Get(1).(*api.QueryMeta)
-	return pair, meta, args.Error(2)
-}
-
-func (m *MockKV) Put(p *api.KVPair, q *api.WriteOptions) (*api.WriteMeta, error) {
-	args := m.Called(p, q)
-	meta, _ := args.Get(0).(*api.WriteMeta)
-	return meta, args.Error(1)
-}
-
-func (m *MockKV) Acquire(p *api.KVPair, q *api.WriteOptions) (bool, *api.WriteMeta, error) {
-	args := m.Called(p, q)
-	boolResult := args.Bool(0)
-	var meta *api.WriteMeta
-	if args.Get(1) != nil {
-		meta = args.Get(1).(*api.WriteMeta)
-	}
-	errResult := args.Error(2)
-	return boolResult, meta, errResult
-}
-
-func TestSessionWrapper_Destroy(t *testing.T) {
-	mockSession := new(MockSession)
-	sessionWrapper := &SessionWrapper{session: mockSession}
-
-	sessionID := "session_id"
-	writeOptions := &api.WriteOptions{}
-
-	expectedMeta := &api.WriteMeta{}
-	expectedErr := errors.New("destroy error")
-
-	mockSession.On("Destroy", sessionID, writeOptions).Return(expectedMeta, expectedErr)
-
-	meta, err := sessionWrapper.Destroy(sessionID, writeOptions)
-
-	assert.Equal(t, expectedMeta, meta)
-	assert.Equal(t, expectedErr, err)
-	mockSession.AssertCalled(t, "Destroy", sessionID, writeOptions)
-}
-
-func TestSessionWrapper_Info(t *testing.T) {
-	mockSession := new(MockSession)
-	sessionWrapper := &SessionWrapper{session: mockSession}
-
-	sessionID := "session_id"
-	queryOptions := &api.QueryOptions{}
-
-	expectedEntry := &api.SessionEntry{ID: sessionID}
-	expectedMeta := &api.QueryMeta{}
-	expectedErr := errors.New("info error")
-
-	mockSession.On("Info", sessionID, queryOptions).Return(expectedEntry, expectedMeta, expectedErr)
-
-	entry, meta, err := sessionWrapper.Info(sessionID, queryOptions)
-
-	assert.Equal(t, expectedEntry, entry)
-	assert.Equal(t, expectedMeta, meta)
-	assert.Equal(t, expectedErr, err)
-	mockSession.AssertCalled(t, "Info", sessionID, queryOptions)
-}
-
-func TestKVWrapper_Put(t *testing.T) {
-	mockKV := new(MockKV)
-	kvWrapper := &KVWrapper{kv: mockKV}
-
-	kvPair := &api.KVPair{Key: "test_key", Value: []byte("test_value")}
-	writeOptions := &api.WriteOptions{}
-
-	expectedMeta := &api.WriteMeta{}
-	expectedErr := errors.New("put error")
-
-	mockKV.On("Put", kvPair, writeOptions).Return(expectedMeta, expectedErr)
-
-	meta, err := kvWrapper.Put(kvPair, writeOptions)
-
-	assert.Equal(t, expectedMeta, meta)
-	assert.Equal(t, expectedErr, err)
-	mockKV.AssertCalled(t, "Put", kvPair, writeOptions)
 }
 
 func TestRun(t *testing.T) {
@@ -2357,75 +1931,6 @@ func TestHandleServiceCriticalState_WarningState(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestConsulClientWrappers(t *testing.T) {
-	// Test consulClient wrapper methods
-	// These tests verify that the wrapper methods correctly delegate to the underlying api.Client
-	// Note: These tests use a nil api.Client because we're testing the wrapper structure,
-	// not the actual Consul API calls
-
-	t.Run("consulClient Agent returns AgentWrapper", func(t *testing.T) {
-		// Create a consul client with default config (will work even without running Consul)
-		apiClient, err := api.NewClient(api.DefaultConfig())
-		assert.NoError(t, err)
-
-		cc := &consulClient{client: apiClient}
-		agent := cc.Agent()
-		assert.NotNil(t, agent)
-
-		// Verify it returns an AgentWrapper
-		_, ok := agent.(*AgentWrapper)
-		assert.True(t, ok, "Agent() should return *AgentWrapper")
-	})
-
-	t.Run("consulClient Catalog returns CatalogWrapper", func(t *testing.T) {
-		apiClient, err := api.NewClient(api.DefaultConfig())
-		assert.NoError(t, err)
-
-		cc := &consulClient{client: apiClient}
-		catalog := cc.Catalog()
-		assert.NotNil(t, catalog)
-
-		_, ok := catalog.(*CatalogWrapper)
-		assert.True(t, ok, "Catalog() should return *CatalogWrapper")
-	})
-
-	t.Run("consulClient Health returns HealthWrapper", func(t *testing.T) {
-		apiClient, err := api.NewClient(api.DefaultConfig())
-		assert.NoError(t, err)
-
-		cc := &consulClient{client: apiClient}
-		health := cc.Health()
-		assert.NotNil(t, health)
-
-		_, ok := health.(*HealthWrapper)
-		assert.True(t, ok, "Health() should return *HealthWrapper")
-	})
-
-	t.Run("consulClient Session returns SessionWrapper", func(t *testing.T) {
-		apiClient, err := api.NewClient(api.DefaultConfig())
-		assert.NoError(t, err)
-
-		cc := &consulClient{client: apiClient}
-		session := cc.Session()
-		assert.NotNil(t, session)
-
-		_, ok := session.(*SessionWrapper)
-		assert.True(t, ok, "Session() should return *SessionWrapper")
-	})
-
-	t.Run("consulClient KV returns KVWrapper", func(t *testing.T) {
-		apiClient, err := api.NewClient(api.DefaultConfig())
-		assert.NoError(t, err)
-
-		cc := &consulClient{client: apiClient}
-		kv := cc.KV()
-		assert.NotNil(t, kv)
-
-		_, ok := kv.(*KVWrapper)
-		assert.True(t, ok, "KV() should return *KVWrapper")
-	})
-}
-
 func TestCommandExecutor(t *testing.T) {
 	t.Run("CommandContext creates exec.Cmd", func(t *testing.T) {
 		executor := &commandExecutor{}
@@ -2446,18 +1951,6 @@ func TestCommandExecutor(t *testing.T) {
 		cmd := executor.CommandContext(ctx, "true")
 		assert.NotNil(t, cmd)
 	})
-}
-
-func TestHealthWrapper_Checks(t *testing.T) {
-	// Test HealthWrapper directly with a mock Health
-	apiClient, err := api.NewClient(api.DefaultConfig())
-	assert.NoError(t, err)
-
-	hw := &HealthWrapper{health: apiClient.Health()}
-	assert.NotNil(t, hw)
-
-	// We can't actually call Checks without a running Consul,
-	// but we verify the wrapper is correctly structured
 }
 
 func TestUpdateServiceTags_WithCommandExecution(t *testing.T) {
@@ -2526,8 +2019,10 @@ func TestUpdateServiceTags_WithCommandExecution(t *testing.T) {
 		err := b.updateServiceTags(true)
 		assert.NoError(t, err)
 
-		// Give goroutine time to execute
-		time.Sleep(1500 * time.Millisecond)
+		result, ok := observeHookResult(t, b)
+		assert.True(t, ok)
+		assert.NoError(t, result.Err)
+		assert.Equal(t, HookPromote, result.Transition)
 
 		mockAgent.AssertCalled(t, "ServiceRegister", mock.Anything)
 	})
@@ -2597,8 +2092,10 @@ func TestUpdateServiceTags_WithCommandExecution(t *testing.T) {
 		err := b.updateServiceTags(false)
 		assert.NoError(t, err)
 
-		// Give goroutine time to execute
-		time.Sleep(1500 * time.Millisecond)
+		result, ok := observeHookResult(t, b)
+		assert.True(t, ok)
+		assert.NoError(t, result.Err)
+		assert.Equal(t, HookDemote, result.Transition)
 
 		mockAgent.AssertCalled(t, "ServiceRegister", mock.Anything)
 	})
@@ -2668,8 +2165,9 @@ func TestUpdateServiceTags_WithCommandExecution(t *testing.T) {
 		err := b.updateServiceTags(true)
 		assert.NoError(t, err)
 
-		// Give goroutine time to execute
-		time.Sleep(1500 * time.Millisecond)
+		result, ok := observeHookResult(t, b)
+		assert.True(t, ok)
+		assert.Error(t, result.Err)
 	})
 
 	t.Run("Handles session data retrieval error in command goroutine", func(t *testing.T) {
@@ -2724,9 +2222,17 @@ func TestUpdateServiceTags_WithCommandExecution(t *testing.T) {
 		err := b.updateServiceTags(true)
 		assert.NoError(t, err)
 
-		// Wait for goroutine to handle the error
-		time.Sleep(200 * time.Millisecond)
+		result, ok := observeHookResult(t, b)
+		assert.True(t, ok)
+		assert.ErrorContains(t, result.Err, "kv error")
 	})
+}
+
+func observeHookResult(t *testing.T, b *Ballot) (HookResult, bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return b.ObserveHookResult(ctx)
 }
 
 func TestRun_SmallTTL(t *testing.T) {
@@ -2863,53 +2369,5 @@ func TestUpdateLeadershipStatus_Error(t *testing.T) {
 		err := b.updateLeadershipStatus(true)
 		assert.Error(t, err)
 		assert.Equal(t, expectedErr, err)
-	})
-}
-
-func TestNew_ViperUnmarshalError(t *testing.T) {
-	t.Run("New returns error when viper unmarshal fails", func(t *testing.T) {
-		viper.Reset()
-		// Set an invalid type that will cause unmarshal to fail
-		// TTL expects a duration string but we give it an invalid map
-		viper.Set("election.services.badconfig.ttl", map[string]string{"invalid": "type"})
-		viper.Set("election.services.badconfig.id", "test_id")
-		viper.Set("election.services.badconfig.key", "test/key")
-
-		defer viper.Reset()
-
-		b, err := New(context.Background(), "badconfig")
-		assert.Error(t, err)
-		assert.Nil(t, b)
-	})
-}
-
-func TestNew_DefaultValues(t *testing.T) {
-	t.Run("New sets default LockDelay and TTL when not specified", func(t *testing.T) {
-		viper.Reset()
-		viper.Set("election.services.defaults.id", "test_service_id")
-		viper.Set("election.services.defaults.key", "election/test/leader")
-		// Don't set TTL or LockDelay
-
-		defer viper.Reset()
-
-		b, err := New(context.Background(), "defaults")
-		assert.NoError(t, err)
-		assert.NotNil(t, b)
-		assert.Equal(t, 3*time.Second, b.LockDelay)
-		assert.Equal(t, 10*time.Second, b.TTL)
-	})
-
-	t.Run("New sets Name from parameter when not in config", func(t *testing.T) {
-		viper.Reset()
-		viper.Set("election.services.myservice.id", "test_service_id")
-		viper.Set("election.services.myservice.key", "election/test/leader")
-		// Don't set Name
-
-		defer viper.Reset()
-
-		b, err := New(context.Background(), "myservice")
-		assert.NoError(t, err)
-		assert.NotNil(t, b)
-		assert.Equal(t, "myservice", b.Name)
 	})
 }

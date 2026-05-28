@@ -44,13 +44,38 @@ func TestRunElectionWithContext_InvalidService(t *testing.T) {
 
 	err := runElectionWithContext(ctx)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to create ballot for service invalid_service")
+	assert.Contains(t, err.Error(), "failed to load configuration for service invalid_service")
 }
 
 func TestRunCmd_Structure(t *testing.T) {
 	assert.Equal(t, "run", runCmd.Use)
 	assert.NotEmpty(t, runCmd.Short)
 	assert.NotNil(t, runCmd.RunE)
+}
+
+func TestRuntimeConfigFromViper(t *testing.T) {
+	viper.Reset()
+	defer viper.Reset()
+
+	viper.Set("consul.address", "127.0.0.1:8500")
+	viper.Set("consul.token", "global-token")
+	viper.Set("election.services.test_service.id", "test_id")
+	viper.Set("election.services.test_service.key", "election/test/leader")
+	viper.Set("election.services.test_service.primaryTag", "primary")
+	viper.Set("election.services.test_service.serviceChecks", []string{"service:test_id"})
+	viper.Set("election.services.test_service.execOnPromote", "echo promoted")
+	viper.Set("election.services.test_service.execOnDemote", "echo demoted")
+	viper.Set("election.services.test_service.ttl", "12s")
+	viper.Set("election.services.test_service.lockDelay", "4s")
+
+	cfg, err := runtimeConfigFromViper("test_service")
+
+	assert.NoError(t, err)
+	assert.Equal(t, "test_service", cfg.Name)
+	assert.Equal(t, "test_id", cfg.ID)
+	assert.Equal(t, "election/test/leader", cfg.Key)
+	assert.Equal(t, "127.0.0.1:8500", cfg.ConsulAddress)
+	assert.Equal(t, "global-token", cfg.ConsulToken)
 }
 
 func TestRunElection_CancelledContext(t *testing.T) {

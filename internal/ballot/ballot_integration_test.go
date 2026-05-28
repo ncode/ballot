@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/hashicorp/consul/api"
-	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -80,17 +79,17 @@ func cleanupKV(t *testing.T, client *api.Client, key string) {
 	}
 }
 
-func setupViper(t *testing.T, serviceID string, electionKey string) {
-	t.Helper()
-	viper.Reset()
-	viper.Set("consul.address", getConsulAddr())
-	viper.Set("consul.token", "")
-	viper.Set(fmt.Sprintf("election.services.%s.id", serviceID), serviceID)
-	viper.Set(fmt.Sprintf("election.services.%s.key", serviceID), electionKey)
-	viper.Set(fmt.Sprintf("election.services.%s.primaryTag", serviceID), testPrimaryTag)
-	viper.Set(fmt.Sprintf("election.services.%s.serviceChecks", serviceID), []string{fmt.Sprintf("service:%s", serviceID)})
-	viper.Set(fmt.Sprintf("election.services.%s.ttl", serviceID), "10s")
-	viper.Set(fmt.Sprintf("election.services.%s.lockDelay", serviceID), "1s")
+func testRuntimeConfig(serviceID string, electionKey string) RuntimeConfig {
+	return RuntimeConfig{
+		Name:          serviceID,
+		ID:            serviceID,
+		Key:           electionKey,
+		PrimaryTag:    testPrimaryTag,
+		ServiceChecks: []string{fmt.Sprintf("service:%s", serviceID)},
+		ConsulAddress: getConsulAddr(),
+		TTL:           10 * time.Second,
+		LockDelay:     time.Second,
+	}
 }
 
 func TestIntegration_FullElectionCycle(t *testing.T) {
@@ -104,15 +103,11 @@ func TestIntegration_FullElectionCycle(t *testing.T) {
 	defer deregisterTestService(t, client, serviceID)
 	defer cleanupKV(t, client, electionKey)
 
-	// Setup viper configuration
-	setupViper(t, serviceID, electionKey)
-	defer viper.Reset()
-
 	// Create ballot instance
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	ballot, err := New(ctx, serviceID)
+	ballot, err := New(ctx, testRuntimeConfig(serviceID, electionKey))
 	require.NoError(t, err, "Failed to create Ballot instance")
 	defer ballot.releaseSession()
 
@@ -157,20 +152,13 @@ func TestIntegration_LeaderFailover(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Setup and create first ballot
-	// Note: Ballot copies config at creation time, so resetting viper after
-	// ballot1 is created won't affect it.
-	setupViper(t, serviceID1, electionKey)
-	ballot1, err := New(ctx, serviceID1)
+	ballot1, err := New(ctx, testRuntimeConfig(serviceID1, electionKey))
 	require.NoError(t, err)
 	defer ballot1.releaseSession()
 
-	// Setup and create second ballot with fresh viper config
-	setupViper(t, serviceID2, electionKey)
-	ballot2, err := New(ctx, serviceID2)
+	ballot2, err := New(ctx, testRuntimeConfig(serviceID2, electionKey))
 	require.NoError(t, err)
 	defer ballot2.releaseSession()
-	defer viper.Reset()
 
 	// First ballot becomes leader
 	err = ballot1.election()
@@ -190,13 +178,10 @@ func TestIntegration_LeaderFailover(t *testing.T) {
 	_, err = client.Session().Destroy(*sessionID1, nil)
 	require.NoError(t, err, "Failed to destroy session")
 
-	// Wait for lock delay to pass
-	time.Sleep(2 * time.Second)
-
-	// Second ballot should now be able to become leader
-	err = ballot2.election()
-	require.NoError(t, err)
-	assert.True(t, ballot2.IsLeader(), "Ballot 2 should be leader after failover")
+	require.Eventually(t, func() bool {
+		err = ballot2.election()
+		return err == nil && ballot2.IsLeader()
+	}, 5*time.Second, 100*time.Millisecond, "Ballot 2 should be leader after failover")
 
 	// Verify primary tag moved to second service
 	service2, _, err := client.Agent().Service(serviceID2, nil)
@@ -214,13 +199,10 @@ func TestIntegration_TagPromotion(t *testing.T) {
 	defer deregisterTestService(t, client, serviceID)
 	defer cleanupKV(t, client, electionKey)
 
-	setupViper(t, serviceID, electionKey)
-	defer viper.Reset()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	ballot, err := New(ctx, serviceID)
+	ballot, err := New(ctx, testRuntimeConfig(serviceID, electionKey))
 	require.NoError(t, err)
 	defer ballot.releaseSession()
 
@@ -251,13 +233,10 @@ func TestIntegration_HealthCheckFailure(t *testing.T) {
 	defer deregisterTestService(t, client, serviceID)
 	defer cleanupKV(t, client, electionKey)
 
-	setupViper(t, serviceID, electionKey)
-	defer viper.Reset()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	ballot, err := New(ctx, serviceID)
+	ballot, err := New(ctx, testRuntimeConfig(serviceID, electionKey))
 	require.NoError(t, err)
 	defer ballot.releaseSession()
 
@@ -314,14 +293,12 @@ func TestIntegration_MultipleInstances(t *testing.T) {
 		registerTestService(t, client, services[i], 8090+i)
 		defer deregisterTestService(t, client, services[i])
 
-		setupViper(t, services[i], electionKey)
-		b, err := New(ctx, services[i])
+		b, err := New(ctx, testRuntimeConfig(services[i], electionKey))
 		require.NoError(t, err)
 		defer b.releaseSession()
 		ballots[i] = b
 	}
 	defer cleanupKV(t, client, electionKey)
-	defer viper.Reset()
 
 	// Run elections for all instances
 	for i, b := range ballots {
@@ -364,21 +341,10 @@ func TestIntegration_SessionRenewal(t *testing.T) {
 	defer deregisterTestService(t, client, serviceID)
 	defer cleanupKV(t, client, electionKey)
 
-	// Use short TTL to test renewal
-	viper.Reset()
-	viper.Set("consul.address", getConsulAddr())
-	viper.Set(fmt.Sprintf("election.services.%s.id", serviceID), serviceID)
-	viper.Set(fmt.Sprintf("election.services.%s.key", serviceID), electionKey)
-	viper.Set(fmt.Sprintf("election.services.%s.primaryTag", serviceID), testPrimaryTag)
-	viper.Set(fmt.Sprintf("election.services.%s.serviceChecks", serviceID), []string{fmt.Sprintf("service:%s", serviceID)})
-	viper.Set(fmt.Sprintf("election.services.%s.ttl", serviceID), "10s")
-	viper.Set(fmt.Sprintf("election.services.%s.lockDelay", serviceID), "1s")
-	defer viper.Reset()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	ballot, err := New(ctx, serviceID)
+	ballot, err := New(ctx, testRuntimeConfig(serviceID, electionKey))
 	require.NoError(t, err)
 	defer ballot.releaseSession()
 
@@ -391,13 +357,14 @@ func TestIntegration_SessionRenewal(t *testing.T) {
 	require.True(t, ok)
 	require.NotNil(t, sessionID)
 
-	// Wait longer than TTL/2 but less than TTL to verify session is still valid
-	time.Sleep(6 * time.Second)
-
-	// Session should still be valid due to renewal
-	sessionInfo, _, err := client.Session().Info(*sessionID, nil)
-	require.NoError(t, err)
-	assert.NotNil(t, sessionInfo, "Session should still exist after renewal")
+	renewalWindow := time.Now().Add(6 * time.Second)
+	require.Eventually(t, func() bool {
+		if time.Now().Before(renewalWindow) {
+			return false
+		}
+		sessionInfo, _, err := client.Session().Info(*sessionID, nil)
+		return err == nil && sessionInfo != nil
+	}, 8*time.Second, 100*time.Millisecond, "Session should still exist after renewal")
 
 	// Run another election - should maintain leadership
 	err = ballot.election()
