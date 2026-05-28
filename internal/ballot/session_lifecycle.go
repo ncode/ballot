@@ -108,10 +108,6 @@ func (sl *SessionLifecycle) Release() error {
 	return err
 }
 
-func (sl *SessionLifecycle) Events() <-chan SessionEvent {
-	return sl.events
-}
-
 func (sl *SessionLifecycle) getSessionID() (*string, bool) {
 	sessionIDValue := sl.sessionID.Load()
 	if sessionIDValue == nil {

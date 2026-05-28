@@ -70,11 +70,37 @@ func TestNew(t *testing.T) {
 		assert.Nil(t, b)
 		assert.Contains(t, err.Error(), "service ID is required")
 	})
+
+	t.Run("failure due to invalid consul address scheme", func(t *testing.T) {
+		b, err := New(context.Background(), RuntimeConfig{
+			Name:          "test",
+			ID:            "test_service_id",
+			Key:           "election/test_service/leader",
+			ConsulAddress: "gopher://127.0.0.1:8500",
+			TTL:           10 * time.Second,
+			LockDelay:     3 * time.Second,
+		})
+
+		assert.Error(t, err)
+		assert.Nil(t, b)
+		assert.Contains(t, err.Error(), "Unknown protocol scheme")
+	})
+}
+
+func TestConsulClientAccessors(t *testing.T) {
+	apiClient, err := api.NewClient(api.DefaultConfig())
+	assert.NoError(t, err)
+
+	client := &consulClient{client: apiClient}
+
+	assert.NotNil(t, client.Agent())
+	assert.NotNil(t, client.Catalog())
+	assert.NotNil(t, client.Health())
+	assert.NotNil(t, client.Session())
+	assert.NotNil(t, client.KV())
 }
 
 func TestCopyServiceToRegistration(t *testing.T) {
-	b := &Ballot{}
-
 	t.Run("successful copy", func(t *testing.T) {
 		service := &api.AgentService{
 			ID:      "testID",
@@ -84,7 +110,7 @@ func TestCopyServiceToRegistration(t *testing.T) {
 			Address: "127.0.0.1",
 		}
 
-		registration := b.copyServiceToRegistration(service)
+		registration := copyServiceToRegistration(service)
 
 		assert.Equal(t, service.ID, registration.ID)
 		assert.Equal(t, service.Service, registration.Name)
@@ -94,14 +120,12 @@ func TestCopyServiceToRegistration(t *testing.T) {
 	})
 
 	t.Run("handles nil service gracefully", func(t *testing.T) {
-		registration := b.copyServiceToRegistration(nil)
+		registration := copyServiceToRegistration(nil)
 		assert.Nil(t, registration)
 	})
 }
 
 func TestCopyCatalogServiceToRegistration(t *testing.T) {
-	b := &Ballot{}
-
 	t.Run("successful copy", func(t *testing.T) {
 		service := &api.CatalogService{
 			ID:                       "id",
@@ -116,7 +140,7 @@ func TestCopyCatalogServiceToRegistration(t *testing.T) {
 			ServiceEnableTagOverride: true,
 		}
 
-		registration := b.copyCatalogServiceToRegistration(service)
+		registration := copyCatalogServiceToRegistration(service)
 		assert.Equal(t, service.ID, registration.ID)
 		assert.Equal(t, service.Node, registration.Node)
 		assert.Equal(t, service.ServiceAddress, registration.Address)
@@ -131,7 +155,7 @@ func TestCopyCatalogServiceToRegistration(t *testing.T) {
 	})
 
 	t.Run("handles nil service gracefully", func(t *testing.T) {
-		registration := b.copyCatalogServiceToRegistration(nil)
+		registration := copyCatalogServiceToRegistration(nil)
 		assert.Nil(t, registration)
 	})
 }
@@ -144,67 +168,6 @@ type MockCommandExecutor struct {
 func (m *MockCommandExecutor) CommandContext(ctx context.Context, name string, arg ...string) *exec.Cmd {
 	args := m.Called(ctx, name, arg)
 	return args.Get(0).(*exec.Cmd)
-}
-
-func TestRunCommand(t *testing.T) {
-	t.Run("successful command execution", func(t *testing.T) {
-		// Create a mock CommandExecutor
-		mockExecutor := new(MockCommandExecutor)
-
-		// Create a Ballot instance with the mock executor
-		b := &Ballot{
-			executor: mockExecutor,
-			ctx:      context.Background(),
-		}
-
-		// Define the command to run
-		command := "echo hello"
-		payload := &ElectionPayload{
-			Address:   "127.0.0.1",
-			Port:      8080,
-			SessionID: "session",
-		}
-
-		// Set up the expectation
-		// Here, we're using a command that just outputs "mocked" when run
-		mockCmd := exec.Command("echo", "mocked")
-		mockExecutor.On("CommandContext", mock.Anything, "echo", []string{"hello"}).Return(mockCmd)
-
-		// Call the method under test
-		_, err := b.runCommand(command, payload)
-
-		// Assert that the expectations were met
-		mockExecutor.AssertExpectations(t)
-
-		// Assert that the method did not return an error
-		assert.NoError(t, err)
-	})
-
-	t.Run("empty command returns error", func(t *testing.T) {
-		// Create a mock CommandExecutor
-		mockExecutor := new(MockCommandExecutor)
-
-		// Create a Ballot instance with the mock executor
-		b := &Ballot{
-			executor: mockExecutor,
-			ctx:      context.Background(),
-		}
-
-		// Define an empty command
-		command := ""
-		payload := &ElectionPayload{
-			Address:   "127.0.0.1",
-			Port:      8080,
-			SessionID: "session",
-		}
-
-		// Call the method under test with empty command
-		_, err := b.runCommand(command, payload)
-
-		// Assert that an error is returned for empty command
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "empty command")
-	})
 }
 
 func TestIsLeader(t *testing.T) {
@@ -1931,6 +1894,72 @@ func TestHandleServiceCriticalState_WarningState(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestHandleServiceCriticalState_ErrorPaths(t *testing.T) {
+	t.Run("returns release error", func(t *testing.T) {
+		serviceID := "test_service_id"
+		serviceName := "test_service"
+		sessionID := "session_id"
+		expectedErr := errors.New("destroy failed")
+
+		mockHealth := new(MockHealth)
+		mockHealth.On("Checks", serviceName, (*api.QueryOptions)(nil)).Return(api.HealthChecks{
+			{ServiceID: serviceID, CheckID: "check1", Status: "critical"},
+		}, nil, nil)
+		mockSession := new(MockSession)
+		mockSession.On("Destroy", sessionID, (*api.WriteOptions)(nil)).Return(nil, expectedErr)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Health").Return(mockHealth)
+		mockClient.On("Session").Return(mockSession)
+
+		b := &Ballot{
+			client: mockClient,
+			ID:     serviceID,
+			Name:   serviceName,
+		}
+		b.sessionID.Store(&sessionID)
+
+		err := b.handleServiceCriticalState()
+
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to release session")
+	})
+
+	t.Run("returns leadership status update error", func(t *testing.T) {
+		serviceID := "test_service_id"
+		serviceName := "test_service"
+		sessionID := "session_id"
+		expectedErr := errors.New("agent failed")
+
+		mockHealth := new(MockHealth)
+		mockHealth.On("Checks", serviceName, (*api.QueryOptions)(nil)).Return(api.HealthChecks{
+			{ServiceID: serviceID, CheckID: "check1", Status: "critical"},
+		}, nil, nil)
+		mockSession := new(MockSession)
+		mockSession.On("Destroy", sessionID, (*api.WriteOptions)(nil)).Return(nil, nil)
+		mockAgent := new(MockAgent)
+		mockAgent.On("Service", serviceID, mock.Anything).Return(nil, nil, expectedErr)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Health").Return(mockHealth)
+		mockClient.On("Session").Return(mockSession)
+		mockClient.On("Agent").Return(mockAgent)
+
+		b := &Ballot{
+			client:     mockClient,
+			ID:         serviceID,
+			Name:       serviceName,
+			PrimaryTag: "primary",
+		}
+		b.sessionID.Store(&sessionID)
+
+		err := b.handleServiceCriticalState()
+
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to update leadership status")
+	})
+}
+
 func TestCommandExecutor(t *testing.T) {
 	t.Run("CommandContext creates exec.Cmd", func(t *testing.T) {
 		executor := &commandExecutor{}
@@ -2228,11 +2257,73 @@ func TestUpdateServiceTags_WithCommandExecution(t *testing.T) {
 	})
 }
 
+func TestExecuteLeadershipHook_DefaultContext(t *testing.T) {
+	sessionID := "session_id"
+	key := "election/test/leader"
+	payload := &ElectionPayload{
+		Address:   "127.0.0.1",
+		Port:      8080,
+		SessionID: sessionID,
+	}
+	data, _ := json.Marshal(payload)
+
+	mockKV := new(MockKV)
+	mockKV.On("Get", key, (*api.QueryOptions)(nil)).Return(&api.KVPair{
+		Key:   key,
+		Value: data,
+	}, nil, nil)
+
+	mockClient := &MockConsulClient{}
+	mockClient.On("KV").Return(mockKV)
+
+	mockExecutor := new(MockCommandExecutor)
+	mockExecutor.On("CommandContext", mock.Anything, "echo", []string{"ok"}).Return(exec.Command("echo", "ok"))
+
+	b := &Ballot{
+		client:    mockClient,
+		Key:       key,
+		executor:  mockExecutor,
+		TTL:       10 * time.Second,
+		LockDelay: 3 * time.Second,
+	}
+	b.sessionID.Store(&sessionID)
+
+	result := b.executeLeadershipHook(true, "echo ok")
+
+	assert.NoError(t, result.Err)
+	assert.Equal(t, HookPromote, result.Transition)
+	mockExecutor.AssertExpectations(t)
+}
+
+func TestReleaseSession_UsesLifecycle(t *testing.T) {
+	sessionID := "session_id"
+	mockSession := new(MockSession)
+	mockSession.On("Destroy", sessionID, (*api.WriteOptions)(nil)).Return(&api.WriteMeta{}, nil)
+
+	b := &Ballot{
+		TTL:       10 * time.Second,
+		LockDelay: 3 * time.Second,
+		ctx:       context.Background(),
+	}
+	b.sessionID.Store(&sessionID)
+	b.sessionLifecycle = NewSessionLifecycle(b.ctx, mockSession, &b.sessionID, b.runtimeConfig())
+
+	err := b.releaseSession()
+
+	assert.NoError(t, err)
+	mockSession.AssertCalled(t, "Destroy", sessionID, (*api.WriteOptions)(nil))
+}
+
 func observeHookResult(t *testing.T, b *Ballot) (HookResult, bool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	return b.ObserveHookResult(ctx)
+	select {
+	case result := <-b.hookResultsChan():
+		return result, true
+	case <-ctx.Done():
+		return HookResult{Err: ctx.Err()}, false
+	}
 }
 
 func TestRun_SmallTTL(t *testing.T) {
@@ -2343,8 +2434,8 @@ func TestRun_ElectionErrorInLoop(t *testing.T) {
 			done <- b.Run()
 		}()
 
-		// Let it run through at least one ticker cycle with error
-		time.Sleep(200 * time.Millisecond)
+		// Let it run through at least one ticker cycle with error.
+		time.Sleep(1100 * time.Millisecond)
 		cancel()
 
 		err := <-done

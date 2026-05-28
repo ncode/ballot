@@ -74,6 +74,54 @@ func TestElectionStep_Run_successfulTransition(t *testing.T) {
 	mockCatalog.AssertCalled(t, "Register", mock.Anything, (*api.WriteOptions)(nil))
 }
 
+func TestElectionStep_Run_follower(t *testing.T) {
+	b := stepTestBallot(context.Background())
+	sessionID := "session-id"
+	leaderSessionID := "leader-session-id"
+	payload := &ElectionPayload{Address: "127.0.0.2", Port: 8081, SessionID: leaderSessionID}
+	data, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	mockHealth := new(MockHealth)
+	mockHealth.On("Checks", b.Name, (*api.QueryOptions)(nil)).Return(api.HealthChecks{
+		{ServiceID: b.ID, CheckID: "check1", Status: "passing"},
+	}, nil, nil)
+
+	mockAgent := new(MockAgent)
+	mockAgent.On("Service", b.ID, mock.Anything).Return(&api.AgentService{
+		ID:      b.ID,
+		Service: b.Name,
+		Address: "127.0.0.1",
+		Port:    8080,
+		Tags:    []string{},
+	}, nil, nil)
+
+	mockCatalog := new(MockCatalog)
+	mockCatalog.On("Service", b.Name, b.PrimaryTag, mock.Anything).Return([]*api.CatalogService{}, nil, nil)
+
+	mockSession := new(MockSession)
+	mockSession.On("Create", mock.Anything, (*api.WriteOptions)(nil)).Return(sessionID, nil, nil)
+	mockSession.On("RenewPeriodic", "10s", sessionID, (*api.WriteOptions)(nil), mock.Anything).Return(nil)
+
+	mockKV := new(MockKV)
+	mockKV.On("Acquire", mock.Anything, (*api.WriteOptions)(nil)).Return(false, nil, nil)
+	mockKV.On("Get", b.Key, (*api.QueryOptions)(nil)).Return(&api.KVPair{Key: b.Key, Value: data, Session: leaderSessionID}, nil, nil)
+
+	mockClient := &MockConsulClient{}
+	mockClient.On("Health").Return(mockHealth)
+	mockClient.On("Agent").Return(mockAgent)
+	mockClient.On("Catalog").Return(mockCatalog)
+	mockClient.On("Session").Return(mockSession)
+	mockClient.On("KV").Return(mockKV)
+	b.client = mockClient
+
+	result := NewElectionStep(b).Run()
+
+	require.NoError(t, result.Err)
+	assert.Equal(t, ElectionStepFollower, result.Status)
+	assert.False(t, result.Leader)
+}
+
 func TestElectionStep_Run_failures(t *testing.T) {
 	t.Run("critical health", func(t *testing.T) {
 		b := stepTestBallot(context.Background())

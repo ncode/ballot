@@ -82,9 +82,56 @@ func TestLeadershipHooks_Execute(t *testing.T) {
 		assert.NoError(t, result.Err)
 		assert.True(t, result.Skipped)
 	})
+
+	t.Run("nil executor uses command executor", func(t *testing.T) {
+		hooks := NewLeadershipHooks(nil)
+
+		result := hooks.Execute(context.Background(), HookRequest{
+			Command: `sh -c 'printf default-executor'`,
+			Payload: payload,
+			Timeout: time.Second,
+		})
+
+		require.NoError(t, result.Err)
+		assert.Equal(t, "default-executor", string(result.Output))
+	})
+
+	t.Run("missing payload fails before command execution", func(t *testing.T) {
+		hooks := NewLeadershipHooks(&commandExecutor{})
+
+		result := hooks.Execute(context.Background(), HookRequest{
+			Command: "echo should-not-run",
+		})
+
+		require.Error(t, result.Err)
+		assert.Contains(t, result.Err.Error(), "hook payload is required")
+	})
+
+	t.Run("malformed command fails before command execution", func(t *testing.T) {
+		hooks := NewLeadershipHooks(&commandExecutor{})
+
+		result := hooks.Execute(context.Background(), HookRequest{
+			Command: "'unterminated",
+			Payload: payload,
+		})
+
+		require.Error(t, result.Err)
+	})
+
+	t.Run("comment-only command is rejected as empty", func(t *testing.T) {
+		hooks := NewLeadershipHooks(&commandExecutor{})
+
+		result := hooks.Execute(context.Background(), HookRequest{
+			Command: "# skipped by shlex",
+			Payload: payload,
+		})
+
+		require.Error(t, result.Err)
+		assert.Contains(t, result.Err.Error(), "empty command")
+	})
 }
 
-func TestBallot_ObserveHookResult(t *testing.T) {
+func TestBallot_PublishHookResult(t *testing.T) {
 	t.Run("observes published result", func(t *testing.T) {
 		b := &Ballot{}
 		expected := HookResult{Transition: HookPromote, Command: "echo promoted", Output: []byte("promoted\n")}
@@ -96,17 +143,6 @@ func TestBallot_ObserveHookResult(t *testing.T) {
 		assert.Equal(t, expected.Transition, result.Transition)
 		assert.Equal(t, expected.Command, result.Command)
 		assert.Equal(t, expected.Output, result.Output)
-	})
-
-	t.Run("returns false when context is cancelled", func(t *testing.T) {
-		b := &Ballot{}
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
-		result, ok := b.ObserveHookResult(ctx)
-
-		assert.False(t, ok)
-		assert.ErrorIs(t, result.Err, context.Canceled)
 	})
 
 	t.Run("concurrent publish and observe share one channel", func(t *testing.T) {
