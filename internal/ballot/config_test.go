@@ -107,4 +107,89 @@ func TestRuntimeConfigFor(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "ttl")
 	})
+
+	t.Run("missing services map", func(t *testing.T) {
+		_, err := RuntimeConfigFor(LoadedConfig{}, "my-service")
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `service "my-service" is not configured`)
+	})
+
+	t.Run("missing named service", func(t *testing.T) {
+		_, err := RuntimeConfigFor(LoadedConfig{
+			Election: LoadedElectionConfig{
+				Services: map[string]LoadedServiceConfig{},
+			},
+		}, "my-service")
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `service "my-service" is not configured`)
+	})
+
+	t.Run("malformed lock delay", func(t *testing.T) {
+		_, err := RuntimeConfigFor(LoadedConfig{
+			Election: LoadedElectionConfig{
+				Services: map[string]LoadedServiceConfig{
+					"my-service": {
+						ID:        "service-id",
+						Key:       "election/service/leader",
+						LockDelay: "definitely-not-a-duration",
+					},
+				},
+			},
+		}, "my-service")
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "lockDelay")
+	})
+}
+
+func TestValidateRuntimeConfig(t *testing.T) {
+	valid := RuntimeConfig{
+		Name:      "my-service",
+		ID:        "service-id",
+		Key:       "election/service/leader",
+		TTL:       DefaultSessionTTL,
+		LockDelay: DefaultLockDelay,
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*RuntimeConfig)
+		wantErr string
+	}{
+		{
+			name: "missing service name",
+			mutate: func(cfg *RuntimeConfig) {
+				cfg.Name = ""
+			},
+			wantErr: "service name is required",
+		},
+		{
+			name: "missing ttl",
+			mutate: func(cfg *RuntimeConfig) {
+				cfg.TTL = 0
+			},
+			wantErr: "ttl is required",
+		},
+		{
+			name: "missing lock delay",
+			mutate: func(cfg *RuntimeConfig) {
+				cfg.LockDelay = 0
+			},
+			wantErr: "lockDelay is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := valid
+			tt.mutate(&cfg)
+
+			err := validateRuntimeConfig(cfg)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }

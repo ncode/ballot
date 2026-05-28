@@ -117,4 +117,88 @@ func TestSessionLifecycle(t *testing.T) {
 		require.True(t, ok)
 		assert.Nil(t, stored)
 	})
+
+	t.Run("nil context defaults to background and clones checks", func(t *testing.T) {
+		var sessionID atomic.Value
+		cfg := runtimeConfig
+		cfg.ServiceChecks = []string{"service:test_service_id"}
+
+		lifecycle := NewSessionLifecycle(nil, nil, &sessionID, cfg)
+		cfg.ServiceChecks[0] = "changed"
+
+		require.NotNil(t, lifecycle.ctx)
+		assert.Equal(t, []string{"service:test_service_id"}, lifecycle.checks)
+	})
+
+	t.Run("active session without consul session client returns error", func(t *testing.T) {
+		var sessionID atomic.Value
+		lifecycle := NewSessionLifecycle(context.Background(), nil, &sessionID, runtimeConfig)
+
+		id, err := lifecycle.ActiveSession()
+
+		require.Error(t, err)
+		assert.Empty(t, id)
+		assert.Contains(t, err.Error(), "consul client is required")
+	})
+
+	t.Run("release without session is no-op", func(t *testing.T) {
+		var sessionID atomic.Value
+		mockSession := new(MockSession)
+		lifecycle := NewSessionLifecycle(context.Background(), mockSession, &sessionID, runtimeConfig)
+
+		err := lifecycle.Release()
+
+		require.NoError(t, err)
+		mockSession.AssertNotCalled(t, "Destroy", mock.Anything, mock.Anything)
+	})
+
+	t.Run("renewal panic is recovered", func(t *testing.T) {
+		var sessionID atomic.Value
+		renewStarted := make(chan struct{})
+		session := &panicRenewSession{renewStarted: renewStarted}
+
+		lifecycle := NewSessionLifecycle(context.Background(), session, &sessionID, runtimeConfig)
+		id, err := lifecycle.ActiveSession()
+
+		require.NoError(t, err)
+		assert.Equal(t, "session-1", id)
+		select {
+		case <-renewStarted:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for renewal")
+		}
+	})
+
+	t.Run("publish drops events when buffer is full", func(t *testing.T) {
+		var sessionID atomic.Value
+		lifecycle := NewSessionLifecycle(context.Background(), nil, &sessionID, runtimeConfig)
+
+		for i := 0; i < cap(lifecycle.events); i++ {
+			lifecycle.publish(SessionEvent{Type: SessionCreated})
+		}
+		lifecycle.publish(SessionEvent{Type: SessionReleased})
+
+		assert.Equal(t, cap(lifecycle.events), len(lifecycle.events))
+	})
+}
+
+type panicRenewSession struct {
+	renewStarted chan struct{}
+}
+
+func (s *panicRenewSession) Create(*api.SessionEntry, *api.WriteOptions) (string, *api.WriteMeta, error) {
+	return "session-1", nil, nil
+}
+
+func (s *panicRenewSession) Destroy(string, *api.WriteOptions) (*api.WriteMeta, error) {
+	return nil, nil
+}
+
+func (s *panicRenewSession) Info(string, *api.QueryOptions) (*api.SessionEntry, *api.QueryMeta, error) {
+	return nil, nil, nil
+}
+
+func (s *panicRenewSession) RenewPeriodic(string, string, *api.WriteOptions, <-chan struct{}) error {
+	close(s.renewStarted)
+	panic("renew panic")
 }

@@ -70,6 +70,34 @@ func TestNew(t *testing.T) {
 		assert.Nil(t, b)
 		assert.Contains(t, err.Error(), "service ID is required")
 	})
+
+	t.Run("failure due to invalid consul address scheme", func(t *testing.T) {
+		b, err := New(context.Background(), RuntimeConfig{
+			Name:          "test",
+			ID:            "test_service_id",
+			Key:           "election/test_service/leader",
+			ConsulAddress: "gopher://127.0.0.1:8500",
+			TTL:           10 * time.Second,
+			LockDelay:     3 * time.Second,
+		})
+
+		assert.Error(t, err)
+		assert.Nil(t, b)
+		assert.Contains(t, err.Error(), "Unknown protocol scheme")
+	})
+}
+
+func TestConsulClientAccessors(t *testing.T) {
+	apiClient, err := api.NewClient(api.DefaultConfig())
+	assert.NoError(t, err)
+
+	client := &consulClient{client: apiClient}
+
+	assert.NotNil(t, client.Agent())
+	assert.NotNil(t, client.Catalog())
+	assert.NotNil(t, client.Health())
+	assert.NotNil(t, client.Session())
+	assert.NotNil(t, client.KV())
 }
 
 func TestCopyServiceToRegistration(t *testing.T) {
@@ -204,6 +232,25 @@ func TestRunCommand(t *testing.T) {
 		// Assert that an error is returned for empty command
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "empty command")
+	})
+
+	t.Run("nil context defaults to background", func(t *testing.T) {
+		mockExecutor := new(MockCommandExecutor)
+		b := &Ballot{
+			executor: mockExecutor,
+		}
+		payload := &ElectionPayload{
+			Address:   "127.0.0.1",
+			Port:      8080,
+			SessionID: "session",
+		}
+		mockCmd := exec.Command("echo", "mocked")
+		mockExecutor.On("CommandContext", mock.Anything, "echo", []string{"hello"}).Return(mockCmd)
+
+		_, err := b.runCommand("echo hello", payload)
+
+		assert.NoError(t, err)
+		mockExecutor.AssertExpectations(t)
 	})
 }
 
@@ -1931,6 +1978,72 @@ func TestHandleServiceCriticalState_WarningState(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestHandleServiceCriticalState_ErrorPaths(t *testing.T) {
+	t.Run("returns release error", func(t *testing.T) {
+		serviceID := "test_service_id"
+		serviceName := "test_service"
+		sessionID := "session_id"
+		expectedErr := errors.New("destroy failed")
+
+		mockHealth := new(MockHealth)
+		mockHealth.On("Checks", serviceName, (*api.QueryOptions)(nil)).Return(api.HealthChecks{
+			{ServiceID: serviceID, CheckID: "check1", Status: "critical"},
+		}, nil, nil)
+		mockSession := new(MockSession)
+		mockSession.On("Destroy", sessionID, (*api.WriteOptions)(nil)).Return(nil, expectedErr)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Health").Return(mockHealth)
+		mockClient.On("Session").Return(mockSession)
+
+		b := &Ballot{
+			client: mockClient,
+			ID:     serviceID,
+			Name:   serviceName,
+		}
+		b.sessionID.Store(&sessionID)
+
+		err := b.handleServiceCriticalState()
+
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to release session")
+	})
+
+	t.Run("returns leadership status update error", func(t *testing.T) {
+		serviceID := "test_service_id"
+		serviceName := "test_service"
+		sessionID := "session_id"
+		expectedErr := errors.New("agent failed")
+
+		mockHealth := new(MockHealth)
+		mockHealth.On("Checks", serviceName, (*api.QueryOptions)(nil)).Return(api.HealthChecks{
+			{ServiceID: serviceID, CheckID: "check1", Status: "critical"},
+		}, nil, nil)
+		mockSession := new(MockSession)
+		mockSession.On("Destroy", sessionID, (*api.WriteOptions)(nil)).Return(nil, nil)
+		mockAgent := new(MockAgent)
+		mockAgent.On("Service", serviceID, mock.Anything).Return(nil, nil, expectedErr)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Health").Return(mockHealth)
+		mockClient.On("Session").Return(mockSession)
+		mockClient.On("Agent").Return(mockAgent)
+
+		b := &Ballot{
+			client:     mockClient,
+			ID:         serviceID,
+			Name:       serviceName,
+			PrimaryTag: "primary",
+		}
+		b.sessionID.Store(&sessionID)
+
+		err := b.handleServiceCriticalState()
+
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to update leadership status")
+	})
+}
+
 func TestCommandExecutor(t *testing.T) {
 	t.Run("CommandContext creates exec.Cmd", func(t *testing.T) {
 		executor := &commandExecutor{}
@@ -2228,6 +2341,63 @@ func TestUpdateServiceTags_WithCommandExecution(t *testing.T) {
 	})
 }
 
+func TestExecuteLeadershipHook_DefaultContext(t *testing.T) {
+	sessionID := "session_id"
+	key := "election/test/leader"
+	payload := &ElectionPayload{
+		Address:   "127.0.0.1",
+		Port:      8080,
+		SessionID: sessionID,
+	}
+	data, _ := json.Marshal(payload)
+
+	mockKV := new(MockKV)
+	mockKV.On("Get", key, (*api.QueryOptions)(nil)).Return(&api.KVPair{
+		Key:   key,
+		Value: data,
+	}, nil, nil)
+
+	mockClient := &MockConsulClient{}
+	mockClient.On("KV").Return(mockKV)
+
+	mockExecutor := new(MockCommandExecutor)
+	mockExecutor.On("CommandContext", mock.Anything, "echo", []string{"ok"}).Return(exec.Command("echo", "ok"))
+
+	b := &Ballot{
+		client:    mockClient,
+		Key:       key,
+		executor:  mockExecutor,
+		TTL:       10 * time.Second,
+		LockDelay: 3 * time.Second,
+	}
+	b.sessionID.Store(&sessionID)
+
+	result := b.executeLeadershipHook(true, "echo ok")
+
+	assert.NoError(t, result.Err)
+	assert.Equal(t, HookPromote, result.Transition)
+	mockExecutor.AssertExpectations(t)
+}
+
+func TestReleaseSession_UsesLifecycle(t *testing.T) {
+	sessionID := "session_id"
+	mockSession := new(MockSession)
+	mockSession.On("Destroy", sessionID, (*api.WriteOptions)(nil)).Return(&api.WriteMeta{}, nil)
+
+	b := &Ballot{
+		TTL:       10 * time.Second,
+		LockDelay: 3 * time.Second,
+		ctx:       context.Background(),
+	}
+	b.sessionID.Store(&sessionID)
+	b.sessionLifecycle = NewSessionLifecycle(b.ctx, mockSession, &b.sessionID, b.runtimeConfig())
+
+	err := b.releaseSession()
+
+	assert.NoError(t, err)
+	mockSession.AssertCalled(t, "Destroy", sessionID, (*api.WriteOptions)(nil))
+}
+
 func observeHookResult(t *testing.T, b *Ballot) (HookResult, bool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -2343,8 +2513,8 @@ func TestRun_ElectionErrorInLoop(t *testing.T) {
 			done <- b.Run()
 		}()
 
-		// Let it run through at least one ticker cycle with error
-		time.Sleep(200 * time.Millisecond)
+		// Let it run through at least one ticker cycle with error.
+		time.Sleep(1100 * time.Millisecond)
 		cancel()
 
 		err := <-done
