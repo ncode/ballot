@@ -371,3 +371,233 @@ func TestIntegration_SessionRenewal(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ballot.IsLeader(), "Should still be leader after session renewal")
 }
+
+// disableMaintenance ensures both node and service maintenance are disabled for
+// the configured service ID. It is always invoked by deferred cleanup so a
+// failed test never leaves a Consul agent in maintenance.
+func disableMaintenance(t *testing.T, client *api.Client, serviceID string) {
+	t.Helper()
+	if err := client.Agent().DisableServiceMaintenance(serviceID); err != nil {
+		t.Logf("Warning: failed to disable service maintenance for %s: %v", serviceID, err)
+	}
+	if err := client.Agent().DisableNodeMaintenance(); err != nil {
+		t.Logf("Warning: failed to disable node maintenance: %v", err)
+	}
+}
+
+// waitForAggregatedHealth waits until the local Agent reports the expected
+// aggregated health status for the configured service ID. Consul transports
+// maintenance through a service-unavailable response that the Go client
+// reports as critical in its first return value, so the reliable aggregate
+// state is read from the response body's AggregatedStatus field.
+func waitForAggregatedHealth(t *testing.T, client *api.Client, serviceID, expected string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		_, info, err := client.Agent().AgentHealthServiceByID(serviceID)
+		if err != nil {
+			return false
+		}
+		if info != nil {
+			return info.AggregatedStatus == expected
+		}
+		// No service details (e.g. not found): fall back to the absent/critical
+		// signal only when that is what the caller expects.
+		return expected == api.HealthCritical
+	}, 5*time.Second, 100*time.Millisecond, "service %s should reach %s health", serviceID, expected)
+}
+
+// TestIntegration_NodeMaintenance_FollowerCannotBeElected verifies that a
+// follower cannot be elected while the local Consul node is in maintenance.
+// See task 4.1.
+func TestIntegration_NodeMaintenance_FollowerCannotBeElected(t *testing.T) {
+	client := setupConsulClient(t)
+
+	serviceID := fmt.Sprintf("test-maint-node-follower-%d", time.Now().UnixNano())
+	electionKey := fmt.Sprintf("election/test/maint-node-follower-%d/leader", time.Now().UnixNano())
+
+	registerTestService(t, client, serviceID, 8700)
+	defer deregisterTestService(t, client, serviceID)
+	defer cleanupKV(t, client, electionKey)
+	defer disableMaintenance(t, client, serviceID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ballot, err := New(ctx, testRuntimeConfig(serviceID, electionKey))
+	require.NoError(t, err)
+	defer ballot.releaseSession()
+
+	// Enable node maintenance and wait for the agent to reflect it.
+	require.NoError(t, client.Agent().EnableNodeMaintenance("integration test"))
+	waitForAggregatedHealth(t, client, serviceID, api.HealthMaint)
+
+	// Run an election step while in maintenance: the follower must not be
+	// elected and must report the critical-health result.
+	err = ballot.election()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "critical state")
+	assert.False(t, ballot.IsLeader(), "Maintained follower must not become leader")
+
+	// No session should have been created.
+	sessionID, ok := ballot.getSessionID()
+	assert.False(t, ok, "Maintained follower must not create a session")
+	assert.Nil(t, sessionID, "Maintained follower must not create a session")
+
+	// No KV lock should be held.
+	kvPair, _, err := client.KV().Get(electionKey, nil)
+	require.NoError(t, err)
+	assert.Nil(t, kvPair, "No KV lock should exist while in maintenance")
+}
+
+// TestIntegration_NodeMaintenance_LeaderStepsDown verifies that an existing
+// leader steps down when the local Consul node enters maintenance. See task
+// 4.1.
+func TestIntegration_NodeMaintenance_LeaderStepsDown(t *testing.T) {
+	client := setupConsulClient(t)
+
+	serviceID := fmt.Sprintf("test-maint-node-leader-%d", time.Now().UnixNano())
+	electionKey := fmt.Sprintf("election/test/maint-node-leader-%d/leader", time.Now().UnixNano())
+
+	registerTestService(t, client, serviceID, 8701)
+	defer deregisterTestService(t, client, serviceID)
+	defer cleanupKV(t, client, electionKey)
+	defer disableMaintenance(t, client, serviceID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ballot, err := New(ctx, testRuntimeConfig(serviceID, electionKey))
+	require.NoError(t, err)
+	defer ballot.releaseSession()
+
+	// Become leader first.
+	require.NoError(t, ballot.election())
+	require.True(t, ballot.IsLeader(), "Should be leader before maintenance")
+
+	// Enable node maintenance and wait for the agent to reflect it.
+	require.NoError(t, client.Agent().EnableNodeMaintenance("integration test"))
+	waitForAggregatedHealth(t, client, serviceID, api.HealthMaint)
+
+	// Run another election step: the leader must step down.
+	err = ballot.election()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "critical state")
+	assert.False(t, ballot.IsLeader(), "Leader must step down under node maintenance")
+
+	// The primary tag should have been removed.
+	service, _, err := client.Agent().Service(serviceID, nil)
+	require.NoError(t, err)
+	assert.NotContains(t, service.Tags, testPrimaryTag, "Primary tag must be removed under maintenance")
+
+	// Disabling maintenance restores eligibility. See task 4.3. The recovery
+	// election is retried to account for Consul's lock delay after the
+	// leadership session was released during step-down.
+	require.NoError(t, client.Agent().DisableNodeMaintenance())
+	waitForAggregatedHealth(t, client, serviceID, api.HealthPassing)
+
+	require.Eventually(t, func() bool {
+		err := ballot.election()
+		return err == nil && ballot.IsLeader()
+	}, 5*time.Second, 100*time.Millisecond, "Should be eligible again after maintenance is disabled")
+}
+
+// TestIntegration_ServiceMaintenance_PrecedenceOverServiceChecks verifies that
+// service maintenance blocks election even when the generated maintenance
+// check is not listed in serviceChecks, and that a leader steps down. See
+// tasks 4.2 and 4.3.
+func TestIntegration_ServiceMaintenance_PrecedenceOverServiceChecks(t *testing.T) {
+	client := setupConsulClient(t)
+
+	serviceID := fmt.Sprintf("test-maint-svc-%d", time.Now().UnixNano())
+	electionKey := fmt.Sprintf("election/test/maint-svc-%d/leader", time.Now().UnixNano())
+
+	registerTestService(t, client, serviceID, 8702)
+	defer deregisterTestService(t, client, serviceID)
+	defer cleanupKV(t, client, electionKey)
+	defer disableMaintenance(t, client, serviceID)
+
+	// Configure serviceChecks with only the service TTL check; the generated
+	// service-maintenance check id is never listed there.
+	cfg := testRuntimeConfig(serviceID, electionKey)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ballot, err := New(ctx, cfg)
+	require.NoError(t, err)
+	defer ballot.releaseSession()
+
+	// Become leader first.
+	require.NoError(t, ballot.election())
+	require.True(t, ballot.IsLeader(), "Should be leader before maintenance")
+
+	// Enable service maintenance and wait for the agent to reflect it.
+	require.NoError(t, client.Agent().EnableServiceMaintenance(serviceID, "integration test"))
+	waitForAggregatedHealth(t, client, serviceID, api.HealthMaint)
+
+	// Run another election step: the leader must step down despite the
+	// maintenance check not being in serviceChecks.
+	err = ballot.election()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "critical state")
+	assert.False(t, ballot.IsLeader(), "Leader must step down under service maintenance")
+
+	// Disabling maintenance restores eligibility. See task 4.3. The recovery
+	// election is retried to account for Consul's lock delay after the
+	// leadership session was released during step-down.
+	require.NoError(t, client.Agent().DisableServiceMaintenance(serviceID))
+	waitForAggregatedHealth(t, client, serviceID, api.HealthPassing)
+
+	require.Eventually(t, func() bool {
+		err := ballot.election()
+		return err == nil && ballot.IsLeader()
+	}, 5*time.Second, 100*time.Millisecond, "Should be eligible again after service maintenance is disabled")
+}
+
+// TestIntegration_Maintenance_ExposesLocalMaintenanceUnderACLToken is a
+// placeholder for ACL-restricted coverage. The repository's integration
+// Consul agent runs in -dev mode without ACLs enabled, so the service-ID
+// health lookup cannot be exercised under a token policy here. The test
+// documents the expectation and skips when ACLs are unavailable. See task 4.4.
+func TestIntegration_Maintenance_ExposesLocalMaintenanceUnderACLToken(t *testing.T) {
+	client := setupConsulClient(t)
+
+	// The dev agent does not enable ACLs. Detect this by inspecting the agent
+	// self configuration safely; skip when ACLs are unavailable.
+	info, err := client.Agent().Self()
+	require.NoError(t, err)
+
+	if !aclEnabled(info) {
+		t.Skip("ACLs are not enabled on the integration Consul agent; skipping ACL-restricted maintenance coverage")
+	}
+
+	// When ACLs are enabled, the service-ID health lookup must still expose
+	// local maintenance under a service-read-only token. This branch is
+	// exercised only in environments that boot Consul with ACLs.
+	serviceID := fmt.Sprintf("test-maint-acl-%d", time.Now().UnixNano())
+	electionKey := fmt.Sprintf("election/test/maint-acl-%d/leader", time.Now().UnixNano())
+
+	registerTestService(t, client, serviceID, 8703)
+	defer deregisterTestService(t, client, serviceID)
+	defer cleanupKV(t, client, electionKey)
+	defer disableMaintenance(t, client, serviceID)
+
+	require.NoError(t, client.Agent().EnableNodeMaintenance("integration test"))
+	waitForAggregatedHealth(t, client, serviceID, api.HealthMaint)
+
+	status, healthInfo, err := client.Agent().AgentHealthServiceByID(serviceID)
+	require.NoError(t, err)
+	assert.Equal(t, api.HealthCritical, status)
+	require.NotNil(t, healthInfo)
+	assert.Equal(t, api.HealthMaint, healthInfo.AggregatedStatus)
+}
+
+// aclEnabled reports whether the agent self-info indicates ACLs are enabled.
+func aclEnabled(info map[string]map[string]interface{}) bool {
+	acl, ok := info["Config"]["ACL"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	enabled, _ := acl["Enabled"].(bool)
+	return enabled
+}

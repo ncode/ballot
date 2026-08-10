@@ -44,6 +44,11 @@ func (c *consulClient) KV() KVInterface {
 type AgentInterface interface {
 	Service(serviceID string, q *api.QueryOptions) (*api.AgentService, *api.QueryMeta, error)
 	ServiceRegister(service *api.AgentServiceRegistration) error
+	// AgentHealthServiceByID returns the aggregated health status and checks
+	// for the locally registered service matching serviceID. The local Agent
+	// response is service-ID-scoped and includes node-scoped checks such as
+	// node maintenance, which the catalog Health.Checks endpoint omits.
+	AgentHealthServiceByID(serviceID string) (string, *api.AgentServiceChecksInfo, error)
 }
 
 // CatalogInterface is an interface that wraps the Consul catalog methods.
@@ -281,24 +286,34 @@ func (b *Ballot) updateLeadershipStatus(isLeader bool) error {
 	return nil
 }
 
-// handleServiceCriticalState is called when the service is in a critical state.
+// handleServiceCriticalState is called when the service is in a critical state
+// or under local node/service maintenance. Both conditions follow the same
+// pre-election relinquishment path: release the active session, clear local
+// leadership, remove the primary tag, and stop the election step before any
+// acquisition attempt. Relinquishment is fail-closed: even if session
+// destruction fails, Ballot still clears local leadership and attempts to
+// remove the primary tag so a maintained or unhealthy instance never presents
+// itself as eligible or primary, while reporting the operational error.
 func (b *Ballot) handleServiceCriticalState() error {
 	state, err := b.interaction().HealthState()
 	if err != nil {
 		return err
 	}
-	if state == "critical" {
-		err := b.releaseSession()
-		if err != nil {
-			return fmt.Errorf("failed to release session for service in critical state: %s", err)
-		}
-		err = b.updateLeadershipStatus(false)
-		if err != nil {
-			return fmt.Errorf("failed to update leadership status for service in critical state: %s", err)
-		}
+	if state != "critical" {
+		return nil
+	}
+	releaseErr := b.releaseSession()
+	leadershipErr := b.updateLeadershipStatus(false)
+	switch {
+	case releaseErr != nil && leadershipErr != nil:
+		return fmt.Errorf("failed to release session for service in critical state: %s; failed to update leadership status: %s", releaseErr, leadershipErr)
+	case leadershipErr != nil:
+		return fmt.Errorf("failed to update leadership status for service in critical state: %s", leadershipErr)
+	case releaseErr != nil:
+		return fmt.Errorf("failed to release session for service in critical state: %s", releaseErr)
+	default:
 		return fmt.Errorf("service is in critical state, skipping the election")
 	}
-	return nil
 }
 
 // session is responsible for creating and renewing the session.
