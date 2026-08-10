@@ -37,23 +37,58 @@ func (i *ConsulElectionInteraction) LocalService() (*api.AgentService, []*api.Ca
 }
 
 func (i *ConsulElectionInteraction) HealthState() (string, error) {
-	healthChecks, _, err := i.client.Health().Checks(i.cfg.Name, nil)
+	// Read health from the local Agent health endpoint scoped to the configured
+	// service ID. Unlike Health.Checks(serviceName), this response is instance
+	// scoped and includes node-scoped checks such as node maintenance, which the
+	// catalog-oriented endpoint omits. The first return value is derived from
+	// the HTTP status code and is unreliable for maintenance (it maps
+	// service-unavailable to critical), so classification relies on the response
+	// body below.
+	_, info, err := i.client.Agent().AgentHealthServiceByID(i.cfg.ID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get health checks: %w", err)
 	}
 
+	// When the local Agent has no service matching the configured ID, Consul
+	// reports critical with no service details. Do not convert that absence into
+	// a health failure; the local-service lookup remains responsible for
+	// producing the election step's service-failure result so absence stays
+	// distinguishable from maintenance.
+	if info == nil || info.Service == nil {
+		return "passing", nil
+	}
+
+	// Maintenance of the local node or configured service instance is an
+	// unconditional election blocker that bypasses the configured-check
+	// allowlist. Consul transports maintenance through a service-unavailable
+	// response that the Go client reports as critical, so inspect the response
+	// body's aggregated status and maintenance check identifiers explicitly
+	// rather than relying only on the returned status string.
+	if info.AggregatedStatus == api.HealthMaint {
+		return "critical", nil
+	}
+	serviceMaintCheckID := api.ServiceMaintPrefix + i.cfg.ID
+	for _, check := range info.Checks {
+		if check.CheckID == api.NodeMaint || check.CheckID == serviceMaintCheckID {
+			return "critical", nil
+		}
+	}
+
+	// Ordinary service checks continue to require the configured service ID and,
+	// when non-empty, membership in serviceChecks. Node-scoped checks (such as
+	// serfHealth) do not carry the configured service ID and are ignored here.
 	state := "passing"
-	for _, check := range healthChecks {
+	for _, check := range info.Checks {
 		if check.ServiceID != i.cfg.ID {
 			continue
 		}
 		if len(i.cfg.ServiceChecks) > 0 && !slices.Contains(i.cfg.ServiceChecks, check.CheckID) {
 			continue
 		}
-		if check.Status == "critical" {
+		if check.Status == api.HealthCritical {
 			return "critical", nil
 		}
-		if check.Status == "warning" {
+		if check.Status == api.HealthWarning {
 			state = "warning"
 		}
 	}

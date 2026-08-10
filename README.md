@@ -20,6 +20,8 @@ Ballot leverages Consul's session and key-value (KV) store APIs to perform leade
 3. Leader Election: The instance that successfully acquires the lock is elected as the leader.
 4. Tagging the Leader: The leader is tagged with a specified tag (e.g., primary) in the Consul catalog.
 5. Health Checks: The leader's health is continuously monitored. If the leader becomes unhealthy, the lock is released, and a new election occurs.
+
+   Local Consul maintenance always takes precedence over configured election checks. When the local Consul node or the configured local service instance is placed in maintenance (via `consul maint` or the Agent maintenance API), Ballot treats that instance as ineligible for election regardless of the `serviceChecks` allowlist: a maintained follower does not create a session or attempt to acquire the lock, and a maintained leader releases its session, clears local leadership, and removes its primary tag. Maintenance is reevaluated on every election step, so the instance participates again as soon as maintenance is disabled and its configured checks permit election. Maintenance and health state belonging to other nodes or service instances never disqualify the configured local instance.
 6. Hooks Execution: Custom scripts or commands can be executed when a service is promoted to leader or demoted.
 
 ```mermaid
@@ -136,7 +138,7 @@ election:
       id: my-service-name                   # ID of the service
       key: my-service-name                  # Key to be used for the lock in Consul, this should be the same across all nodes
       token:                                # Token to be used for the session in Consul
-      serviceChecks:                        # List of checks to be used to determine the health of the service
+      serviceChecks:                        # List of checks to be used to determine the health of the service. Local node and service maintenance always override this allowlist.
         - ping                              # Name of the check
       primaryTag: primary                   # Tag to be used to mark the leader
       execOnPromote: '/bin/echo primary'    # Command to be executed when the service is elected as leader

@@ -473,13 +473,17 @@ func TestHandleServiceCriticalState(t *testing.T) {
 	})
 
 	t.Run("service is in passing state", func(t *testing.T) {
-		mockHealth := new(MockHealth)
-		mockHealth.On("Checks", "test_service", (*api.QueryOptions)(nil)).Return([]*api.HealthCheck{
-			{Status: "passing"},
-		}, nil, nil)
+		mockAgent := new(MockAgent)
+		mockAgent.On("AgentHealthServiceByID", "").Return(api.HealthPassing, &api.AgentServiceChecksInfo{
+			AggregatedStatus: api.HealthPassing,
+			Service:          &api.AgentService{Service: "test_service"},
+			Checks: api.HealthChecks{
+				{Status: api.HealthPassing},
+			},
+		}, nil)
 
 		mockClient := &MockConsulClient{}
-		mockClient.On("Health").Return(mockHealth)
+		mockClient.On("Agent").Return(mockAgent)
 
 		b := &Ballot{
 			client: mockClient,
@@ -492,11 +496,11 @@ func TestHandleServiceCriticalState(t *testing.T) {
 
 	t.Run("error occurs when getting health checks", func(t *testing.T) {
 		expectedErr := fmt.Errorf("health check error")
-		mockHealth := new(MockHealth)
-		mockHealth.On("Checks", "test_service", (*api.QueryOptions)(nil)).Return(nil, nil, expectedErr)
+		mockAgent := new(MockAgent)
+		mockAgent.On("AgentHealthServiceByID", "").Return("", (*api.AgentServiceChecksInfo)(nil), expectedErr)
 
 		mockClient := &MockConsulClient{}
-		mockClient.On("Health").Return(mockHealth)
+		mockClient.On("Agent").Return(mockAgent)
 
 		b := &Ballot{
 			client: mockClient,
@@ -510,15 +514,21 @@ func TestHandleServiceCriticalState(t *testing.T) {
 
 	t.Run("filters checks by service ID", func(t *testing.T) {
 		serviceID := "test_service_id"
-		mockHealth := new(MockHealth)
-		// Return multiple health checks, some for this instance and some for others
-		mockHealth.On("Checks", "test_service", (*api.QueryOptions)(nil)).Return([]*api.HealthCheck{
-			{ServiceID: serviceID, CheckID: "check1", Status: "passing"},
-			{ServiceID: "other_service_id", CheckID: "check2", Status: "critical"}, // Different instance - should be ignored
-		}, nil, nil)
+		mockAgent := new(MockAgent)
+		// The local Agent health response is scoped to the configured service
+		// ID, but include a check for another instance to prove ordinary
+		// instance filtering is still applied.
+		mockAgent.On("AgentHealthServiceByID", serviceID).Return(api.HealthPassing, &api.AgentServiceChecksInfo{
+			AggregatedStatus: api.HealthPassing,
+			Service:          &api.AgentService{ID: serviceID, Service: "test_service"},
+			Checks: api.HealthChecks{
+				{ServiceID: serviceID, CheckID: "check1", Status: api.HealthPassing},
+				{ServiceID: "other_service_id", CheckID: "check2", Status: api.HealthCritical}, // Different instance - should be ignored
+			},
+		}, nil)
 
 		mockClient := &MockConsulClient{}
-		mockClient.On("Health").Return(mockHealth)
+		mockClient.On("Agent").Return(mockAgent)
 
 		b := &Ballot{
 			client: mockClient,
@@ -536,16 +546,19 @@ func TestHandleServiceCriticalState(t *testing.T) {
 		serviceName := "test_service"
 		primaryTag := "primary"
 
-		mockHealth := new(MockHealth)
 		mockSession := new(MockSession)
 		mockAgent := new(MockAgent)
 		mockCatalog := new(MockCatalog)
 
 		// Return health checks where this instance is critical
-		mockHealth.On("Checks", serviceName, (*api.QueryOptions)(nil)).Return([]*api.HealthCheck{
-			{ServiceID: serviceID, CheckID: "check1", Status: "critical"},
-			{ServiceID: "other_service_id", CheckID: "check2", Status: "passing"},
-		}, nil, nil)
+		mockAgent.On("AgentHealthServiceByID", serviceID).Return(api.HealthCritical, &api.AgentServiceChecksInfo{
+			AggregatedStatus: api.HealthCritical,
+			Service:          &api.AgentService{ID: serviceID, Service: serviceName},
+			Checks: api.HealthChecks{
+				{ServiceID: serviceID, CheckID: "check1", Status: api.HealthCritical},
+				{ServiceID: "other_service_id", CheckID: "check2", Status: api.HealthPassing},
+			},
+		}, nil)
 
 		sessionID := "session_id"
 		mockSession.On("Destroy", sessionID, (*api.WriteOptions)(nil)).Return(nil, nil)
@@ -559,7 +572,6 @@ func TestHandleServiceCriticalState(t *testing.T) {
 		mockCatalog.On("Service", serviceName, primaryTag, mock.Anything).Return([]*api.CatalogService{}, nil, nil)
 
 		mockClient := &MockConsulClient{}
-		mockClient.On("Health").Return(mockHealth)
 		mockClient.On("Session").Return(mockSession)
 		mockClient.On("Agent").Return(mockAgent)
 		mockClient.On("Catalog").Return(mockCatalog)
@@ -582,15 +594,19 @@ func TestHandleServiceCriticalState(t *testing.T) {
 
 	t.Run("filters checks by ServiceChecks list", func(t *testing.T) {
 		serviceID := "test_service_id"
-		mockHealth := new(MockHealth)
+		mockAgent := new(MockAgent)
 		// Return multiple health checks
-		mockHealth.On("Checks", "test_service", (*api.QueryOptions)(nil)).Return([]*api.HealthCheck{
-			{ServiceID: serviceID, CheckID: "check1", Status: "passing"},
-			{ServiceID: serviceID, CheckID: "check2", Status: "critical"}, // Not in ServiceChecks - should be ignored
-		}, nil, nil)
+		mockAgent.On("AgentHealthServiceByID", serviceID).Return(api.HealthPassing, &api.AgentServiceChecksInfo{
+			AggregatedStatus: api.HealthPassing,
+			Service:          &api.AgentService{ID: serviceID, Service: "test_service"},
+			Checks: api.HealthChecks{
+				{ServiceID: serviceID, CheckID: "check1", Status: api.HealthPassing},
+				{ServiceID: serviceID, CheckID: "check2", Status: api.HealthCritical}, // Not in ServiceChecks - should be ignored
+			},
+		}, nil)
 
 		mockClient := &MockConsulClient{}
-		mockClient.On("Health").Return(mockHealth)
+		mockClient.On("Agent").Return(mockAgent)
 
 		b := &Ballot{
 			client:        mockClient,
@@ -1387,12 +1403,6 @@ func TestElection(t *testing.T) {
 			ctx:        context.Background(),
 		}
 
-		// Mock health checks
-		mockHealth := new(MockHealth)
-		mockHealth.On("Checks", b.Name, mock.Anything).Return([]*api.HealthCheck{
-			{Status: "passing"},
-		}, nil, nil)
-
 		// Mock session
 		sessionID := "session_id"
 		mockSession := new(MockSession)
@@ -1415,7 +1425,7 @@ func TestElection(t *testing.T) {
 			Session: sessionID,
 		}, nil, nil)
 
-		// Mock Agent
+		// Mock Agent health (passing) and service
 		service := &api.AgentService{
 			ID:      b.ID,
 			Service: b.Name,
@@ -1425,6 +1435,13 @@ func TestElection(t *testing.T) {
 		}
 		mockAgent := new(MockAgent)
 		mockAgent.On("Service", b.ID, mock.Anything).Return(service, nil, nil)
+		mockAgent.On("AgentHealthServiceByID", b.ID).Return(api.HealthPassing, &api.AgentServiceChecksInfo{
+			AggregatedStatus: api.HealthPassing,
+			Service:          service,
+			Checks: api.HealthChecks{
+				{ServiceID: b.ID, CheckID: "check1", Status: api.HealthPassing},
+			},
+		}, nil)
 		mockAgent.On("ServiceRegister", mock.Anything).Return(nil)
 
 		// Mock Catalog
@@ -1435,7 +1452,6 @@ func TestElection(t *testing.T) {
 
 		// Set up the mock client
 		mockClient := &MockConsulClient{}
-		mockClient.On("Health").Return(mockHealth)
 		mockClient.On("Session").Return(mockSession)
 		mockClient.On("KV").Return(mockKV)
 		mockClient.On("Agent").Return(mockAgent)
@@ -1470,12 +1486,6 @@ func TestRun(t *testing.T) {
 		}
 		b.sessionID.Store(&sessionID)
 
-		// Mock health checks
-		mockHealth := new(MockHealth)
-		mockHealth.On("Checks", b.Name, mock.Anything).Return([]*api.HealthCheck{
-			{Status: "passing"},
-		}, nil, nil)
-
 		// Mock session
 		mockSession := new(MockSession)
 		mockSession.On("Create", mock.Anything, mock.Anything).Return(sessionID, nil, nil)
@@ -1497,7 +1507,7 @@ func TestRun(t *testing.T) {
 			Session: sessionID,
 		}, nil, nil)
 
-		// Mock Agent
+		// Mock Agent health (passing) and service
 		service := &api.AgentService{
 			ID:      b.ID,
 			Service: b.Name,
@@ -1507,6 +1517,13 @@ func TestRun(t *testing.T) {
 		}
 		mockAgent := new(MockAgent)
 		mockAgent.On("Service", b.ID, mock.Anything).Return(service, nil, nil)
+		mockAgent.On("AgentHealthServiceByID", b.ID).Return(api.HealthPassing, &api.AgentServiceChecksInfo{
+			AggregatedStatus: api.HealthPassing,
+			Service:          service,
+			Checks: api.HealthChecks{
+				{ServiceID: b.ID, CheckID: "check1", Status: api.HealthPassing},
+			},
+		}, nil)
 		mockAgent.On("ServiceRegister", mock.Anything).Return(nil)
 
 		// Mock Catalog
@@ -1516,7 +1533,6 @@ func TestRun(t *testing.T) {
 		mockCatalog.On("Register", mock.Anything, mock.Anything).Return(nil, nil)
 
 		mockClient := &MockConsulClient{}
-		mockClient.On("Health").Return(mockHealth)
 		mockClient.On("Session").Return(mockSession)
 		mockClient.On("KV").Return(mockKV)
 		mockClient.On("Agent").Return(mockAgent)
@@ -1682,12 +1698,12 @@ func TestElection_HandleCriticalStateError(t *testing.T) {
 		Name: "test_service",
 	}
 
-	mockHealth := new(MockHealth)
+	mockAgent := new(MockAgent)
 	expectedErr := errors.New("health check error")
-	mockHealth.On("Checks", b.Name, mock.Anything).Return(nil, nil, expectedErr)
+	mockAgent.On("AgentHealthServiceByID", b.ID).Return("", (*api.AgentServiceChecksInfo)(nil), expectedErr)
 
 	mockClient := &MockConsulClient{}
-	mockClient.On("Health").Return(mockHealth)
+	mockClient.On("Agent").Return(mockAgent)
 
 	b.client = mockClient
 
@@ -1702,17 +1718,18 @@ func TestElection_GetServiceError(t *testing.T) {
 		Name: "test_service",
 	}
 
-	mockHealth := new(MockHealth)
-	mockHealth.On("Checks", b.Name, mock.Anything).Return([]*api.HealthCheck{
-		{Status: "passing"},
-	}, nil, nil)
-
 	mockAgent := new(MockAgent)
+	mockAgent.On("AgentHealthServiceByID", b.ID).Return(api.HealthPassing, &api.AgentServiceChecksInfo{
+		AggregatedStatus: api.HealthPassing,
+		Service:          &api.AgentService{ID: b.ID, Service: b.Name},
+		Checks: api.HealthChecks{
+			{ServiceID: b.ID, CheckID: "check1", Status: api.HealthPassing},
+		},
+	}, nil)
 	expectedErr := errors.New("agent service error")
 	mockAgent.On("Service", b.ID, mock.Anything).Return(nil, nil, expectedErr)
 
 	mockClient := &MockConsulClient{}
-	mockClient.On("Health").Return(mockHealth)
 	mockClient.On("Agent").Return(mockAgent)
 
 	b.client = mockClient
@@ -1730,12 +1747,14 @@ func TestElection_SessionError(t *testing.T) {
 		ctx:  context.Background(),
 	}
 
-	mockHealth := new(MockHealth)
-	mockHealth.On("Checks", b.Name, mock.Anything).Return([]*api.HealthCheck{
-		{Status: "passing"},
-	}, nil, nil)
-
 	mockAgent := new(MockAgent)
+	mockAgent.On("AgentHealthServiceByID", b.ID).Return(api.HealthPassing, &api.AgentServiceChecksInfo{
+		AggregatedStatus: api.HealthPassing,
+		Service:          &api.AgentService{ID: b.ID, Service: b.Name},
+		Checks: api.HealthChecks{
+			{ServiceID: b.ID, CheckID: "check1", Status: api.HealthPassing},
+		},
+	}, nil)
 	mockAgent.On("Service", b.ID, mock.Anything).Return(&api.AgentService{
 		ID:      b.ID,
 		Service: b.Name,
@@ -1749,7 +1768,6 @@ func TestElection_SessionError(t *testing.T) {
 	mockSession.On("Create", mock.Anything, mock.Anything).Return("", nil, expectedErr)
 
 	mockClient := &MockConsulClient{}
-	mockClient.On("Health").Return(mockHealth)
 	mockClient.On("Agent").Return(mockAgent)
 	mockClient.On("Catalog").Return(mockCatalog)
 	mockClient.On("Session").Return(mockSession)
@@ -1772,12 +1790,14 @@ func TestElection_NilSessionID(t *testing.T) {
 		ctx:        context.Background(),
 	}
 
-	mockHealth := new(MockHealth)
-	mockHealth.On("Checks", b.Name, mock.Anything).Return([]*api.HealthCheck{
-		{Status: "passing"},
-	}, nil, nil)
-
 	mockAgent := new(MockAgent)
+	mockAgent.On("AgentHealthServiceByID", b.ID).Return(api.HealthPassing, &api.AgentServiceChecksInfo{
+		AggregatedStatus: api.HealthPassing,
+		Service:          &api.AgentService{ID: b.ID, Service: b.Name},
+		Checks: api.HealthChecks{
+			{ServiceID: b.ID, CheckID: "check1", Status: api.HealthPassing},
+		},
+	}, nil)
 	mockAgent.On("Service", b.ID, mock.Anything).Return(&api.AgentService{
 		ID:      b.ID,
 		Service: b.Name,
@@ -1809,7 +1829,6 @@ func TestElection_NilSessionID(t *testing.T) {
 	}, nil, nil)
 
 	mockClient := &MockConsulClient{}
-	mockClient.On("Health").Return(mockHealth)
 	mockClient.On("Agent").Return(mockAgent)
 	mockClient.On("Catalog").Return(mockCatalog)
 	mockClient.On("Session").Return(mockSession)
@@ -1876,13 +1895,17 @@ func TestHandleServiceCriticalState_WarningState(t *testing.T) {
 	serviceID := "test_service_id"
 	serviceName := "test_service"
 
-	mockHealth := new(MockHealth)
-	mockHealth.On("Checks", serviceName, (*api.QueryOptions)(nil)).Return([]*api.HealthCheck{
-		{ServiceID: serviceID, CheckID: "check1", Status: "warning"},
-	}, nil, nil)
+	mockAgent := new(MockAgent)
+	mockAgent.On("AgentHealthServiceByID", serviceID).Return(api.HealthWarning, &api.AgentServiceChecksInfo{
+		AggregatedStatus: api.HealthWarning,
+		Service:          &api.AgentService{ID: serviceID, Service: serviceName},
+		Checks: api.HealthChecks{
+			{ServiceID: serviceID, CheckID: "check1", Status: api.HealthWarning},
+		},
+	}, nil)
 
 	mockClient := &MockConsulClient{}
-	mockClient.On("Health").Return(mockHealth)
+	mockClient.On("Agent").Return(mockAgent)
 
 	b := &Ballot{
 		client: mockClient,
@@ -1895,34 +1918,93 @@ func TestHandleServiceCriticalState_WarningState(t *testing.T) {
 }
 
 func TestHandleServiceCriticalState_ErrorPaths(t *testing.T) {
-	t.Run("returns release error", func(t *testing.T) {
+	t.Run("returns release error but still clears leadership", func(t *testing.T) {
 		serviceID := "test_service_id"
 		serviceName := "test_service"
+		primaryTag := "primary"
 		sessionID := "session_id"
 		expectedErr := errors.New("destroy failed")
 
-		mockHealth := new(MockHealth)
-		mockHealth.On("Checks", serviceName, (*api.QueryOptions)(nil)).Return(api.HealthChecks{
-			{ServiceID: serviceID, CheckID: "check1", Status: "critical"},
-		}, nil, nil)
+		mockAgent := new(MockAgent)
+		mockAgent.On("AgentHealthServiceByID", serviceID).Return(api.HealthCritical, &api.AgentServiceChecksInfo{
+			AggregatedStatus: api.HealthCritical,
+			Service:          &api.AgentService{ID: serviceID, Service: serviceName, Tags: []string{primaryTag}},
+			Checks: api.HealthChecks{
+				{ServiceID: serviceID, CheckID: "check1", Status: api.HealthCritical},
+			},
+		}, nil)
 		mockSession := new(MockSession)
 		mockSession.On("Destroy", sessionID, (*api.WriteOptions)(nil)).Return(nil, expectedErr)
+		// Fail-closed: leadership is cleared and primary tag removal is still
+		// attempted even though session destruction failed.
+		mockAgent.On("Service", serviceID, mock.Anything).Return(&api.AgentService{
+			ID:      serviceID,
+			Service: serviceName,
+			Tags:    []string{primaryTag},
+		}, nil, nil)
+		mockAgent.On("ServiceRegister", mock.Anything).Return(nil)
+		mockCatalog := new(MockCatalog)
+		mockCatalog.On("Service", serviceName, primaryTag, mock.Anything).Return([]*api.CatalogService{}, nil, nil)
 
 		mockClient := &MockConsulClient{}
-		mockClient.On("Health").Return(mockHealth)
+		mockClient.On("Agent").Return(mockAgent)
+		mockClient.On("Session").Return(mockSession)
+		mockClient.On("Catalog").Return(mockCatalog)
+
+		b := &Ballot{
+			client:     mockClient,
+			ID:         serviceID,
+			Name:       serviceName,
+			PrimaryTag: primaryTag,
+		}
+		b.sessionID.Store(&sessionID)
+		b.leader.Store(true)
+
+		err := b.handleServiceCriticalState()
+
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to release session")
+		// Fail-closed: local leadership is cleared despite the release error.
+		assert.False(t, b.leader.Load())
+		mockAgent.AssertCalled(t, "ServiceRegister", mock.Anything)
+	})
+
+	t.Run("returns both release and leadership status update errors", func(t *testing.T) {
+		serviceID := "test_service_id"
+		serviceName := "test_service"
+		sessionID := "session_id"
+		releaseErr := errors.New("destroy failed")
+		leadershipErr := errors.New("agent failed")
+
+		mockAgent := new(MockAgent)
+		mockAgent.On("AgentHealthServiceByID", serviceID).Return(api.HealthCritical, &api.AgentServiceChecksInfo{
+			AggregatedStatus: api.HealthCritical,
+			Service:          &api.AgentService{ID: serviceID, Service: serviceName},
+			Checks: api.HealthChecks{
+				{ServiceID: serviceID, CheckID: "check1", Status: api.HealthCritical},
+			},
+		}, nil)
+		mockAgent.On("Service", serviceID, mock.Anything).Return(nil, nil, leadershipErr)
+
+		mockSession := new(MockSession)
+		mockSession.On("Destroy", sessionID, (*api.WriteOptions)(nil)).Return(nil, releaseErr)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Agent").Return(mockAgent)
 		mockClient.On("Session").Return(mockSession)
 
 		b := &Ballot{
-			client: mockClient,
-			ID:     serviceID,
-			Name:   serviceName,
+			client:     mockClient,
+			ID:         serviceID,
+			Name:       serviceName,
+			PrimaryTag: "primary",
 		}
 		b.sessionID.Store(&sessionID)
 
 		err := b.handleServiceCriticalState()
 
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to release session")
+		assert.Equal(t, "failed to release session for service in critical state: destroy failed; failed to update leadership status: agent failed", err.Error())
 	})
 
 	t.Run("returns leadership status update error", func(t *testing.T) {
@@ -1931,19 +2013,21 @@ func TestHandleServiceCriticalState_ErrorPaths(t *testing.T) {
 		sessionID := "session_id"
 		expectedErr := errors.New("agent failed")
 
-		mockHealth := new(MockHealth)
-		mockHealth.On("Checks", serviceName, (*api.QueryOptions)(nil)).Return(api.HealthChecks{
-			{ServiceID: serviceID, CheckID: "check1", Status: "critical"},
-		}, nil, nil)
+		mockAgent := new(MockAgent)
+		mockAgent.On("AgentHealthServiceByID", serviceID).Return(api.HealthCritical, &api.AgentServiceChecksInfo{
+			AggregatedStatus: api.HealthCritical,
+			Service:          &api.AgentService{ID: serviceID, Service: serviceName},
+			Checks: api.HealthChecks{
+				{ServiceID: serviceID, CheckID: "check1", Status: api.HealthCritical},
+			},
+		}, nil)
 		mockSession := new(MockSession)
 		mockSession.On("Destroy", sessionID, (*api.WriteOptions)(nil)).Return(nil, nil)
-		mockAgent := new(MockAgent)
 		mockAgent.On("Service", serviceID, mock.Anything).Return(nil, nil, expectedErr)
 
 		mockClient := &MockConsulClient{}
-		mockClient.On("Health").Return(mockHealth)
-		mockClient.On("Session").Return(mockSession)
 		mockClient.On("Agent").Return(mockAgent)
+		mockClient.On("Session").Return(mockSession)
 
 		b := &Ballot{
 			client:     mockClient,
@@ -2341,11 +2425,6 @@ func TestRun_SmallTTL(t *testing.T) {
 		}
 		b.sessionID.Store(&sessionID)
 
-		mockHealth := new(MockHealth)
-		mockHealth.On("Checks", b.Name, mock.Anything).Return([]*api.HealthCheck{
-			{Status: "passing"},
-		}, nil, nil)
-
 		mockSession := new(MockSession)
 		mockSession.On("Create", mock.Anything, mock.Anything).Return(sessionID, nil, nil)
 		mockSession.On("RenewPeriodic", mock.Anything, sessionID, mock.Anything, mock.Anything).Return(nil)
@@ -2374,6 +2453,13 @@ func TestRun_SmallTTL(t *testing.T) {
 		}
 		mockAgent := new(MockAgent)
 		mockAgent.On("Service", b.ID, mock.Anything).Return(service, nil, nil)
+		mockAgent.On("AgentHealthServiceByID", b.ID).Return(api.HealthPassing, &api.AgentServiceChecksInfo{
+			AggregatedStatus: api.HealthPassing,
+			Service:          service,
+			Checks: api.HealthChecks{
+				{ServiceID: b.ID, CheckID: "check1", Status: api.HealthPassing},
+			},
+		}, nil)
 		mockAgent.On("ServiceRegister", mock.Anything).Return(nil)
 
 		mockCatalog := new(MockCatalog)
@@ -2382,7 +2468,6 @@ func TestRun_SmallTTL(t *testing.T) {
 		mockCatalog.On("Register", mock.Anything, mock.Anything).Return(nil, nil)
 
 		mockClient := &MockConsulClient{}
-		mockClient.On("Health").Return(mockHealth)
 		mockClient.On("Session").Return(mockSession)
 		mockClient.On("KV").Return(mockKV)
 		mockClient.On("Agent").Return(mockAgent)
@@ -2419,13 +2504,13 @@ func TestRun_ElectionErrorInLoop(t *testing.T) {
 		}
 		b.sessionID.Store(&sessionID)
 
-		// Mock health to return error (triggers election error)
-		mockHealth := new(MockHealth)
+		// Mock Agent health to return an error (triggers election error)
+		mockAgent := new(MockAgent)
 		electionErr := errors.New("health check failed")
-		mockHealth.On("Checks", b.Name, mock.Anything).Return(nil, nil, electionErr)
+		mockAgent.On("AgentHealthServiceByID", b.ID).Return("", (*api.AgentServiceChecksInfo)(nil), electionErr)
 
 		mockClient := &MockConsulClient{}
-		mockClient.On("Health").Return(mockHealth)
+		mockClient.On("Agent").Return(mockAgent)
 
 		b.client = mockClient
 

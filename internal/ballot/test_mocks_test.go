@@ -61,6 +61,16 @@ func (m *MockAgent) ServiceDeregister(serviceID string) error {
 	return args.Error(0)
 }
 
+func (m *MockAgent) AgentHealthServiceByID(serviceID string) (string, *api.AgentServiceChecksInfo, error) {
+	args := m.Called(serviceID)
+	status := args.String(0)
+	var info *api.AgentServiceChecksInfo
+	if args.Get(1) != nil {
+		info = args.Get(1).(*api.AgentServiceChecksInfo)
+	}
+	return status, info, args.Error(2)
+}
+
 type MockCatalog struct {
 	mock.Mock
 }

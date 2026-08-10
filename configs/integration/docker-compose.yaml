@@ -2,7 +2,7 @@ services:
   consul:
     image: hashicorp/consul:latest
     container_name: consul-integration
-    command: "agent -dev -bind=0.0.0.0 -client=0.0.0.0"
+    command: ["consul", "agent", "-dev", "-bind=0.0.0.0", "-client=0.0.0.0"]
     ports:
       - "8500:8500"
     healthcheck:
