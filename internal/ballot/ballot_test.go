@@ -1969,6 +1969,44 @@ func TestHandleServiceCriticalState_ErrorPaths(t *testing.T) {
 		mockAgent.AssertCalled(t, "ServiceRegister", mock.Anything)
 	})
 
+	t.Run("returns both release and leadership status update errors", func(t *testing.T) {
+		serviceID := "test_service_id"
+		serviceName := "test_service"
+		sessionID := "session_id"
+		releaseErr := errors.New("destroy failed")
+		leadershipErr := errors.New("agent failed")
+
+		mockAgent := new(MockAgent)
+		mockAgent.On("AgentHealthServiceByID", serviceID).Return(api.HealthCritical, &api.AgentServiceChecksInfo{
+			AggregatedStatus: api.HealthCritical,
+			Service:          &api.AgentService{ID: serviceID, Service: serviceName},
+			Checks: api.HealthChecks{
+				{ServiceID: serviceID, CheckID: "check1", Status: api.HealthCritical},
+			},
+		}, nil)
+		mockAgent.On("Service", serviceID, mock.Anything).Return(nil, nil, leadershipErr)
+
+		mockSession := new(MockSession)
+		mockSession.On("Destroy", sessionID, (*api.WriteOptions)(nil)).Return(nil, releaseErr)
+
+		mockClient := &MockConsulClient{}
+		mockClient.On("Agent").Return(mockAgent)
+		mockClient.On("Session").Return(mockSession)
+
+		b := &Ballot{
+			client:     mockClient,
+			ID:         serviceID,
+			Name:       serviceName,
+			PrimaryTag: "primary",
+		}
+		b.sessionID.Store(&sessionID)
+
+		err := b.handleServiceCriticalState()
+
+		assert.Error(t, err)
+		assert.Equal(t, "failed to release session for service in critical state: destroy failed; failed to update leadership status: agent failed", err.Error())
+	})
+
 	t.Run("returns leadership status update error", func(t *testing.T) {
 		serviceID := "test_service_id"
 		serviceName := "test_service"
