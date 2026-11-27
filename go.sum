@@ -79,6 +79,8 @@ github.com/hashicorp/consul/api v1.34.5 h1:QpMhHZyfYsOsIu5n5QA7TQTLabM4OQJEbKi3p
 github.com/hashicorp/consul/api v1.34.5/go.mod h1:OrXEufkaxFy1pMIRHFrn3JkuircxMhA4BHHpbR8k+5U=
 github.com/hashicorp/consul/api v1.35.0 h1:4ULHUF0DDHcDqQE48KpdbV7PIIQDua3UaJ/bEcUiTE0=
 github.com/hashicorp/consul/api v1.35.0/go.mod h1:RwV43v4y1mHVnJY2V9m89rR/0mDF9QL6q7+G0Rkma/I=
+github.com/hashicorp/consul/api v1.35.1 h1:fVlGFvYSiNUcHfMLDpMxQypK0xlo7SUB8Y8vcTV6YOc=
+github.com/hashicorp/consul/api v1.35.1/go.mod h1:49mXhX2/52F/fn4KUgCqrDrJA+E2d9X5HlWv4q3brZc=
 github.com/hashicorp/consul/api/v2 v2.0.0/go.mod h1:1gEhzpcnl4X4ui7JFpFQvn7QRYQ60IFm6BxBXjrv0dg=
 github.com/hashicorp/consul/sdk v0.17.0 h1:N/JigV6y1yEMfTIhXoW0DXUecM2grQnFuRpY7PcLHLI=
 github.com/hashicorp/consul/sdk v0.17.0/go.mod h1:8dgIhY6VlPUprRH7o7UenVuFEgq017qUn3k9wS5mCt4=
@@ -291,6 +293,8 @@ golang.org/x/sys v0.46.0 h1:noSf2Fq6F8DBgS+LysIkx7rIExoNHJsxOAtPp4rthXw=
 golang.org/x/sys v0.46.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
 golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
 golang.org/x/sys v0.48.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
+golang.org/x/sys v0.49.0 h1:XbzkgYJHdqh/8m2Uu0W/dQv8nktxx4BFHp1M0gROTXA=
+golang.org/x/sys v0.49.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
 golang.org/x/text v0.3.0/go.mod h1:NqM8EUOU14njkJ3fqMW+pc6Ldnwhi/IjpwHt7yyuwOQ=
 golang.org/x/text v0.3.2/go.mod h1:bEr9sfX3Q8Zfm5fL9x+3itogRgK3+ptLWKqgva+5dAk=
 golang.org/x/text v0.32.0 h1:ZD01bjUt1FQ9WJ0ClOL5vxgxOI/sVCNgX1YtKwcY0mU=
